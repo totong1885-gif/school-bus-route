@@ -1,50 +1,105 @@
 # 등하원 차량 (어린이집 통학차량 기사용 PWA)
 
-서버 없이 정적 파일만으로 동작합니다. 데이터는 기사님 휴대폰 브라우저(IndexedDB)에만 저장됩니다.
+기사님이 아이 주소를 등록하면 호차·등하원별로 방문 순서를 계산하고, 정류장마다 내비 앱으로 길안내를 넘깁니다.
+서버 없이 정적 파일만으로 동작하고(월 0원), 데이터는 기사님 휴대폰 브라우저(IndexedDB)에만 저장됩니다.
 
-## 배포 (무료)
-- **GitHub Pages**: 이 폴더를 저장소에 올리고 Settings → Pages → 브랜치 선택. `https://아이디.github.io/저장소/` 로 접속
+## 1. 배포
+- **GitHub Pages**: 저장소 Settings → Pages → `main` 브랜치 `/` 선택. 현재 주소 `https://totong1885-gif.github.io/school-bus-route/`
 - **Cloudflare Pages**: 빌드 명령 없음, 출력 폴더 `/`
-- 휴대폰에서 접속 → 브라우저 메뉴 "홈 화면에 추가"
-- 파일을 고친 뒤에는 `sw.js`의 `VERSION`을 올려야 기기에 새 버전이 반영됩니다
+- 파일을 고친 뒤에는 **`sw.js`의 `VERSION`을 올려야** 휴대폰에 새 버전이 반영됩니다 (예: `v2` → `v3`)
+- 휴대폰 설치: 안드로이드 크롬 ⋮ → "홈 화면에 추가" / 아이폰 사파리 공유 → "홈 화면에 추가"
+- 테스트: `npm test` (Node 18 이상, 설치할 패키지 없음)
 
-## 처음 설정
-1. [카카오 개발자 콘솔](https://developers.kakao.com/)에서 앱 생성 → **[카카오맵] 사용 설정 ON** → REST API 키 복사
-2. 앱 설정 탭에 REST 키 입력, 어린이집 주소 입력 → "주소로 좌표 찾기"
-3. 명단에서 원아 등록 → 시간표에서 회차(출발 시각·요일·탑승 원아) 지정
-4. 코스 탭에서 추천 순서 확인, 필요하면 ▲▼로 바꾸고 "내 코스 저장"
-- 카카오내비를 쓰려면 JavaScript 키를 입력하고, 콘솔의 [플랫폼 → Web]에 배포 도메인을 등록해야 합니다. 키가 없으면 카카오맵으로 대신 엽니다.
+## 2. 키 발급 (카카오)
+1. https://developers.kakao.com 로그인 → [내 애플리케이션] → 앱 추가
+2. 앱 → **[카카오맵] → 사용 설정 ON** (켜지 않으면 주소 검색이 403 오류)
+3. [앱 키]에서 **REST API 키** 복사 → 앱 설정 탭 "카카오 REST API 키"에 붙여 넣기
+4. (카카오내비를 쓸 때만) **JavaScript 키** 입력 + [플랫폼 → Web]에 `https://totong1885-gif.github.io` 등록
+5. (도로 시간을 쓸 때만) 같은 REST 키로 카카오모빌리티 길찾기 API를 호출합니다. 설정에서 "도로 시간으로 계산"을 켜세요.
 
-## 구조
+무료 한도(2026-11-23 확인, 바뀔 수 있음)
+| API | 무료 | 초과 시 | 출처 |
+|---|---|---|---|
+| 카카오 주소 검색 | 하루 100,000건, **개발자 계정의 첫 번째 카카오맵 활성화 앱에만** | 400/-10 오류로 차단. 더 쓰려면 비즈월렛+유료 설정 | [쿼터](https://developers.kakao.com/docs/latest/ko/getting-started/quota), [공지(2026-07-21 변경)](https://devtalk.kakao.com/t/api/150222) |
+| 카카오모빌리티 다중 목적지 길찾기 | 하루 1,000건 | 429/-10 오류. 가격표상 초과분 건당 20원 | [가격](https://developers.kakaomobility.com/price/) |
+
+> 2026-07-21 이전에 만든 앱은 "별도 안내 전까지 기존 무료 쿼터 유지". 두 번째 이후 앱은 비즈월렛 연결이 필요합니다.
+
+## 3. 사용 흐름
+1. **설정**: 어린이집 주소, 호차 수(1~3), 호차별 등원/하원 출발 시각, REST 키
+2. **명단**: 아이 이름·집 주소·같이 타는 지점(선택)·등원/하원 호차·희망 시각·요일별 예외(월~금 × 안 탐/다른 호차/그날만 희망 시각)
+3. **코스**: 추천 코스와 내 코스 비교, ▲▼로 순서 변경 후 저장 (호차·등하원별)
+4. **시간표**: 선생님 공유용 한 장. 엑셀용/카톡용 복사, A4 가로 인쇄
+5. **오늘**: 타는 아이 체크(기본 전부, 해제는 오늘만) → "다음 정류장 길안내" → "도착 완료"
+
+## 4. 계산 규칙
+- 출발·도착 = 어린이집. 같은 주소(띄어쓰기 무시) 또는 같은 "같이 타는 지점"은 한 정류장
+- 순서: 정류장 10곳 이하 → 정확한 최적해(Held-Karp), 11곳 이상 → nearest neighbor + 2-opt + Or-opt
+- 구간 시간 = 기본 이동시간 × 도로보정(1.3) × 여유(1.2), 정류장마다 정차 2분
+  - 기본 이동시간: 직선거리 ÷ 평균속도(30km/h), 또는 도로 시간 API 결과(실시간 교통 반영 여부는 확인 안 됨)
+- 희망 시각: 일찍 도착하면 그 시각까지 대기, 늦으면 경고 + "출발을 N분 앞당기세요". 순서 계산에는 반영하지 않음
+- 그날만 다른 호차로 가는 아이는 그 호차 코스의 가장 덜 돌아가는 위치에 자동으로 넣음
+- 계산 모듈 교체: `js/optimizer.js`의 provider 인터페이스(`matrix(points) → {minutes, meters}`)
+
+## 5. 내비 연결 (정류장 한 곳씩)
+| 앱 | 방식 | 출처 |
+|---|---|---|
+| 네이버지도 (기본) | `nmap://route/car?dlat&dlng&dname&appname`, 안드로이드는 `intent://` | [네이버 지도 URL Scheme](https://guide.ncloud-docs.com/docs/maps-url-scheme) |
+| 카카오맵 | `kakaomap://route?ep=위도,경도&by=car` (PC는 웹 링크) | [카카오맵 URL Scheme](https://apis.map.kakao.com/android_v2/docs/api-guide/urlscheme/), [웹 링크](https://apis.map.kakao.com/web/guide/) |
+| 카카오내비 | JS SDK `Kakao.Navi.start` (URL 스킴 없음). 실패 시 카카오맵 | [카카오내비 JS](https://developers.kakao.com/docs/latest/ko/kakaonavi/js) |
+| 티맵 (실험적) | `tmap://route?goalname&goalx&goaly` — **공식 문서 없음** | — |
+
+앱이 2.5초 안에 열리지 않으면 설치 안내(스토어 링크)를 보여 줍니다.
+
+## 6. 데이터와 개인정보
+- 저장 위치: 기사님 휴대폰 브라우저(IndexedDB)만. 서버·GitHub에는 아이 정보가 올라가지 않습니다(저장소에는 가짜 샘플만)
+- **저장하지 않는 것**: 카카오에서 받은 좌표, 도로 시간 응답 → 메모리에만 두고 앱을 닫으면 사라짐
+- 오프라인: 마지막으로 계산한 **순서·이름·주소 글자·예상 시각**만 표시(좌표 없음 → 길안내·재계산 불가, 주소 복사 가능)
+- 외부로 나가는 것: 카카오 주소 검색에 **주소 글자**, 카카오모빌리티에 **좌표**(이름은 보내지 않음)
+- 명단 파일(JSON)에는 이름·주소가 들어 있습니다. 카톡·메일로 보낼 때 주의하고, 다 쓴 파일은 지우세요
+- 아이폰 사파리는 오래 쓰지 않은 사이트 데이터를 지울 수 있으니 **명단 파일을 정기적으로 내보내세요**
+- 휴대폰 분실 대비: 화면 잠금 필수
+
+## 7. 실기기 점검표
+| # | 항목 | 안드로이드 | 아이폰 |
+|---|---|---|---|
+| 1 | 홈 화면에 추가 → 아이콘·전체화면으로 열림 | ☐ | ☐ |
+| 2 | 실제 REST 키로 어린이집·아이 주소 "주소 확인" 성공 | ☐ | ☐ |
+| 3 | 네이버지도 길안내: 목적지 위치·이름이 맞음 | ☐ | ☐ |
+| 4 | 카카오맵 길안내: `sp` 없이 현재 위치에서 출발하는지 | ☐ | ☐ |
+| 5 | 카카오내비(JS 키·도메인 등록 후) 길안내 시작 | ☐ | ☐ |
+| 6 | 티맵(실험): 목적지가 맞게 들어가는지 | ☐ | ☐ |
+| 7 | 앱 미설치 시 설치 안내가 뜨고 스토어 링크가 맞는 앱인지 | ☐ | ☐ |
+| 8 | 내비에서 돌아왔을 때 앱이 그대로(완료 체크 유지) | ☐ | ☐ |
+| 9 | 비행기 모드로 앱 열기 → 마지막 순서·주소 표시, 멈추지 않음 | ☐ | ☐ |
+| 10 | 시간표 엑셀용 복사 → 엑셀/구글시트 붙여넣기 칸 맞음 | ☐ | ☐ |
+| 11 | 시간표 카톡용 복사 → 카톡 붙여넣기 | ☐ | ☐ |
+| 12 | 시간표 인쇄 → A4 가로 한 장에 들어감 | ☐ | ☐ |
+| 13 | 명단 파일 내보내기 → 다른 폰에서 불러오기 | ☐ | ☐ |
+| 14 | 도로 시간 켜고 계산 → 경로 라벨이 "도로 시간"으로 표시 | ☐ | ☐ |
+| 15 | 햇빛 아래·야간(다크모드)에서 글자와 버튼이 잘 보이는지 | ☐ | ☐ |
+
+## 8. 직접 확인해야 할 항목 (개발자가 결론 내지 않음)
+- 카카오 운영정책·이용약관: 주소 검색 결과를 저장하지 않는 현재 방식이 맞는지, 오프라인 스냅샷(이름·주소 글자·시각)이 문제없는지 — [운영정책](https://developers.kakao.com/terms/latest/ko/site-policies)
+- 카카오모빌리티: 결과 보관 규정, 무료 사용에도 비즈월렛 등록이 필요한지, 약관 위치(문서에서 찾지 못함)
+- 2026-07-21 이후 쿼터 정책: 이 앱의 카카오 앱이 "첫 번째 활성화 앱"인지
+- 개인정보보호법: 아이 이름·주소를 기사 개인 휴대폰에 보관하는 것, 카카오에 주소를 보내는 것에 대한 보호자 고지·동의 필요 여부, 보관 기간·파기
+- 위치정보법: 이 앱은 기사의 현재 위치를 수집하지 않지만, 주소→좌표 변환·내비 연동이 해당하는지
+- 시간표를 카톡 등으로 공유할 때 아이 이름이 외부에 남는 문제
+- 티맵 URL 형식 사용 가능 여부(공식 문서 없음)
+
+## 9. 파일 구조
 ```
-index.html, css/app.css, manifest.webmanifest, sw.js, icons/
-js/app.js            탭 전환, 전역 오류 처리
-js/db.js             IndexedDB (사용 불가 시 메모리 대체)
-js/geocode.js        카카오 주소 검색 (모든 실패 → GeoError 코드)
-js/stops.js          같은 주소 → 한 정류장
-js/plan.js           회차 + 원아 + 설정 → 추천/내 코스 계산
-js/route/distance.js 거리 제공자 인터페이스 + 직선거리
-js/route/optimize.js nearest neighbor → 2-opt + Or-opt, 예상 시각
-js/route/road-kakaomobility.js  도로거리 제공자 자리 (미구현)
-js/navi.js           내비 앱 URL
-js/backup.js         JSON 백업
-js/sample.js         가짜 시험 데이터
-js/views/*.js        5개 화면
-tests/unit.test.mjs  단위 테스트 (node --test tests/unit.test.mjs)
+index.html, manifest.webmanifest, sw.js, css/app.css, icons/
+js/app.js        탭 전환, 전역 오류 처리, 길안내·설치 안내
+js/db.js         IndexedDB v2 (v1 데이터는 지우고 새로 시작)
+js/model.js      요일 예외, 정류장 묶기, 시간 계산, 희망 시각, 코스 계산
+js/optimizer.js  거리 제공자 인터페이스, 최적화(정확해/휴리스틱), 끼워 넣기
+js/roadtime.js   카카오모빌리티 도로 시간 제공자(선택)
+js/geocode.js    카카오 주소 검색(메모리 캐시만)
+js/navlink.js    내비 URL·실행·스토어 링크
+js/backup.js     명단 파일
+js/sample.js     가짜 시험 데이터(가상 도시 "햇살시")
+js/views/        today, timetable, course, roster, settings, common
+tests/           optimizer.test.js, model.test.js
 ```
-
-## 도로거리로 바꾸기
-`{ id, label, async matrix(points) → number[][] (미터) }` 형태의 제공자를 만들어 `buildPlan(..., { provider })`에 넘기면 됩니다. 실패하면 자동으로 직선거리로 대체됩니다.
-
-## 확인한 공식 문서 (2026-11-23)
-| 항목 | 출처 |
-|---|---|
-| 카카오 주소 검색 API | https://developers.kakao.com/docs/latest/ko/local/dev-guide |
-| 카카오 무료 한도 (주소→좌표 100,000건/일, 계정의 첫 앱만) | https://developers.kakao.com/docs/latest/ko/getting-started/quota |
-| 카카오맵 사용 설정, 한도 초과 시 400/-10 | https://developers.kakao.com/docs/latest/ko/kakaomap/common |
-| 카카오 운영정책 제5조 20호 (캐시는 사용자 환경 개선 목적, 최신 유지) | https://developers.kakao.com/terms/latest/ko/site-policies |
-| 카카오맵 길찾기 링크 `/link/to/이름,위도,경도` | https://apis.map.kakao.com/web/guide/ |
-| 카카오내비 JS SDK (웹 URL 스킴 없음) | https://developers.kakao.com/docs/latest/ko/kakaonavi/js |
-| 네이버지도 `nmap://route/car` | https://guide.ncloud-docs.com/docs/maps-url-scheme |
-| 카카오모빌리티 길찾기 무료 한도 | https://developers.kakaomobility.com/price/ |
-| TMAP URL 스킴 | **공식 문서에서 찾지 못함** — 비공식 형식 `tmap://route?goalname=&goalx=경도&goaly=위도` 사용 |

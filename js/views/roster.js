@@ -1,25 +1,48 @@
-// 명단: 원아 등록·수정·삭제. 같은 주소는 한 정류장으로 묶어서 보여 준다.
-import { esc, parseLatLng } from '../util.js';
+// 명단: 아이 등록·수정·삭제, 같은 정류장끼리 묶어 보기, 등원만/하원만 필터, 요일별 예외
+import { esc } from '../util.js';
 import { newId } from '../db.js';
-import { buildStops, normalizeAddress } from '../stops.js';
+import { WEEKDAYS, DAY_NAMES, rideType, stopAddressOf, normalizeKey, parseHHMM } from '../model.js';
 import { geocode } from '../geocode.js';
 
-let editingId = null; // null | 'new' | child id
+let editingId = null; // null | 'new' | id
+let filter = 'all';
 
-function formHtml(c, runs) {
-  const inRuns = new Set(runs.filter((r) => (r.childIds || []).includes(c.id)).map((r) => r.id));
-  const coords = Number.isFinite(c.lat) ? `${c.lat}, ${c.lng}` : '';
+const FILTERS = { all: '전체', am: '등원만', pm: '하원만', both: '등·하원', none: '안 탐' };
+const TYPE_BADGE = { am: '등원만', pm: '하원만', none: '안 탐' };
+
+function vehicleOptions(n, value, { allowDefault = false } = {}) {
+  const opts = [];
+  if (allowDefault) opts.push(`<option value="" ${value === '' || value === null || value === undefined ? 'selected' : ''}>기본대로</option>`);
+  opts.push(`<option value="0" ${String(value) === '0' ? 'selected' : ''}>안 탐</option>`);
+  for (let v = 1; v <= n; v++) opts.push(`<option value="${v}" ${String(value) === String(v) ? 'selected' : ''}>${v}호차</option>`);
+  return opts.join('');
+}
+
+function formHtml(c, n) {
+  const ex = c.exceptions || {};
+  const exRows = WEEKDAYS.map((d) => `
+    <tr><th>${DAY_NAMES[d]}</th>
+      ${['am', 'pm'].map((s) => {
+        const e = ex[`${d}-${s}`] || {};
+        return `<td><select name="ex-${d}-${s}-v" aria-label="${DAY_NAMES[d]} ${s === 'am' ? '등원' : '하원'} 호차">${vehicleOptions(n, e.vehicle ?? '', { allowDefault: true })}</select>
+          <input type="time" name="ex-${d}-${s}-t" value="${esc(e.time || '')}" aria-label="${DAY_NAMES[d]} ${s === 'am' ? '등원' : '하원'} 그날만 희망 시각"></td>`;
+      }).join('')}
+    </tr>`).join('');
   return `
     <form class="card form" id="kid-form">
-      <h3>${c.id ? '원아 수정' : '원아 등록'}</h3>
+      <h3>${c.id ? '아이 정보 수정' : '아이 등록'}</h3>
       <label>이름<input name="name" required value="${esc(c.name || '')}" autocomplete="off"></label>
-      <label>주소 <small>도로명 주소 권장 (예: ○○시 ○○로 12)</small><input name="address" required value="${esc(c.address || '')}" autocomplete="off"></label>
-      <label>상세주소 <small>동·호수. 정류장 묶기와 좌표 검색에는 쓰지 않음</small><input name="detail" value="${esc(c.detail || '')}" autocomplete="off"></label>
-      ${runs.length ? `<fieldset><legend>탑승 회차</legend><div class="chips wrap">
-        ${runs.map((r) => `<label class="chip toggle"><input type="checkbox" name="runs" value="${esc(r.id)}" ${inRuns.has(r.id) || (!c.id && runs.length === 1) ? 'checked' : ''}><span>${esc(r.name)}</span></label>`).join('')}
-      </div></fieldset>` : ''}
-      <details><summary>좌표 직접 입력 (주소 검색이 안 될 때)</summary>
-        <label>위도, 경도<input name="coords" value="${esc(coords)}" placeholder="37.12345, 127.12345" inputmode="decimal"></label>
+      <label>집 주소 <small>도로명 주소 권장. 저장하면 위치를 확인합니다</small><input name="address" required value="${esc(c.address || '')}" autocomplete="off"></label>
+      <label>같이 타는 지점 (선택) <small>집 앞이 아닌 곳(아파트 정문 등)에서 탈 때 그 주소</small><input name="pickup" value="${esc(c.pickup || '')}" autocomplete="off"></label>
+      <button class="btn" type="button" id="check-addr">주소 확인</button> <span id="addr-result" class="small"></span>
+      <div class="two">
+        <label>등원 차량<select name="am-v">${vehicleOptions(n, c.am?.vehicle ?? 1)}</select></label>
+        <label>등원 희망 시각 <small>집 앞 탑승</small><input type="time" name="am-t" value="${esc(c.am?.desired || '')}"></label>
+        <label>하원 차량<select name="pm-v">${vehicleOptions(n, c.pm?.vehicle ?? 1)}</select></label>
+        <label>하원 희망 시각 <small>집 앞 하차</small><input type="time" name="pm-t" value="${esc(c.pm?.desired || '')}"></label>
+      </div>
+      <details ${Object.keys(ex).length ? 'open' : ''}><summary>요일별 예외 (그날만 안 탐 / 다른 호차 / 희망 시각)</summary>
+        <table class="ex-table"><thead><tr><th></th><th>등원</th><th>하원</th></tr></thead><tbody>${exRows}</tbody></table>
       </details>
       <div class="actions">
         <button class="btn primary big" type="submit">저장</button>
@@ -29,117 +52,117 @@ function formHtml(c, runs) {
     </form>`;
 }
 
+function readForm(form, base) {
+  const f = new FormData(form);
+  const exceptions = {};
+  for (const d of WEEKDAYS) {
+    for (const s of ['am', 'pm']) {
+      const v = String(f.get(`ex-${d}-${s}-v`) ?? '');
+      const t = String(f.get(`ex-${d}-${s}-t`) ?? '');
+      const e = {};
+      if (v !== '') e.vehicle = Number(v);
+      if (parseHHMM(t) !== null) e.time = t;
+      if (Object.keys(e).length) exceptions[`${d}-${s}`] = { vehicle: e.vehicle ?? null, time: e.time || '' };
+    }
+  }
+  return {
+    ...base,
+    id: base.id || newId('c'),
+    name: String(f.get('name') || '').trim(),
+    address: String(f.get('address') || '').replace(/\s+/g, ' ').trim(),
+    pickup: String(f.get('pickup') || '').replace(/\s+/g, ' ').trim(),
+    am: { vehicle: Number(f.get('am-v')) || 0, desired: parseHHMM(f.get('am-t')) !== null ? String(f.get('am-t')) : '' },
+    pm: { vehicle: Number(f.get('pm-v')) || 0, desired: parseHHMM(f.get('pm-t')) !== null ? String(f.get('pm-t')) : '' },
+    exceptions,
+    updatedAt: Date.now(),
+  };
+}
+
+function rideText(c) {
+  const p = [];
+  if (c.am?.vehicle > 0) p.push(`등원 ${c.am.vehicle}호차${c.am.desired ? ' ' + c.am.desired : ''}`);
+  if (c.pm?.vehicle > 0) p.push(`하원 ${c.pm.vehicle}호차${c.pm.desired ? ' ' + c.pm.desired : ''}`);
+  const exCount = Object.keys(c.exceptions || {}).length;
+  if (exCount) p.push(`<span class="red">예외 ${exCount}</span>`);
+  return p.join(' · ');
+}
+
 export async function render(el, ctx) {
   const { db } = ctx;
-  const [settings, children, runs] = await Promise.all([db.getSettings(), db.getAll('children'), db.getAll('runs')]);
+  const [settings, children] = await Promise.all([ctx.settings(), db.getAll('children')]);
+  const n = Math.min(3, Math.max(1, Number(settings.vehicleCount) || 1));
   children.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
-  const { stops, missing } = buildStops(children);
-  const byId = new Map(children.map((c) => [c.id, c]));
-  const editing = editingId === 'new' ? {} : byId.get(editingId);
+  const editing = editingId === 'new' ? { am: { vehicle: 1 }, pm: { vehicle: 1 } } : children.find((c) => c.id === editingId);
 
-  const kidBtn = (k) => `<button class="chip" data-edit="${esc(k.id)}">${esc(k.name)}${byId.get(k.id)?.detail ? ` <small>${esc(byId.get(k.id).detail)}</small>` : ''}</button>`;
+  const shown = children.filter((c) => filter === 'all' || rideType(c) === filter);
+  const groups = new Map();
+  for (const c of shown) {
+    const addr = stopAddressOf(c);
+    const k = normalizeKey(addr);
+    if (!groups.has(k)) groups.set(k, { address: addr, kids: [] });
+    groups.get(k).kids.push(c);
+  }
+  const counts = Object.fromEntries(Object.keys(FILTERS).map((k) => [k, k === 'all' ? children.length : children.filter((c) => rideType(c) === k).length]));
 
   el.innerHTML = `
-    ${editing ? formHtml(editing, runs) : `
-      <button class="btn primary big full" id="add">+ 원아 등록</button>
-      ${settings.kakaoRestKey ? '' : '<div class="card warn">카카오 REST 키가 없어 주소로 좌표를 찾을 수 없습니다. 설정에서 입력하거나 좌표를 직접 입력하세요.</div>'}`}
-    ${missing.length ? `<section class="card warn">
-      <h3>좌표 없음 (${missing.length}명) <small>코스에서 빠집니다</small></h3>
-      <div class="chips wrap">${missing.map((c) => kidBtn(c)).join('')}</div>
-      <button class="btn" id="geo-missing">좌표 다시 검색</button>
-    </section>` : ''}
-    <h3 class="section-title">정류장 ${stops.length}곳 · 원아 ${children.length}명</h3>
-    ${stops.map((s) => `
+    ${editing ? formHtml(editing, n) : '<button class="btn primary big full" id="add">+ 아이 등록</button>'}
+    <div class="chips">${Object.entries(FILTERS).map(([k, v]) => `<button class="chip ${filter === k ? 'on' : ''}" data-filter="${k}">${v} <small>${counts[k]}</small></button>`).join('')}</div>
+    <h3 class="section-title">정류장 ${groups.size}곳 · 아이 ${shown.length}명</h3>
+    ${[...groups.values()].map((g) => `
       <section class="card stop-card">
-        <div class="addr">📍 ${esc(s.address)}${s.children.length > 1 ? ` <span class="badge">${s.children.length}명 한 정류장</span>` : ''}</div>
-        <div class="chips wrap">${s.children.map(kidBtn).join('')}</div>
-      </section>`).join('')}
-    ${children.length ? `<button class="btn" id="geo-all">전체 좌표 다시 받기 <small>(주소 변경 반영)</small></button>` : ''}
+        <div class="addr">📍 ${esc(g.address)} ${g.kids.length > 1 ? `<span class="badge">${g.kids.length}명 한 정류장</span>` : ''}</div>
+        ${g.kids.map((c) => `
+          <button class="kid" data-edit="${esc(c.id)}">
+            <b>${esc(c.name)}</b> ${TYPE_BADGE[rideType(c)] ? `<span class="badge alt">${TYPE_BADGE[rideType(c)]}</span>` : ''}
+            <small>${rideText(c)}${c.pickup ? ` · 집: ${esc(c.address)}` : ''}</small>
+          </button>`).join('')}
+      </section>`).join('') || '<p class="muted">해당하는 아이가 없습니다.</p>'}
+    <p class="small muted">명단은 이 휴대폰에만 저장됩니다. 설정 → "명단 파일 내보내기"로 따로 보관하세요.</p>
   `;
 
   el.querySelector('#add')?.addEventListener('click', () => { editingId = 'new'; ctx.refresh(); });
+  el.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { filter = b.dataset.filter; ctx.refresh(); }));
   el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => { editingId = b.dataset.edit; ctx.refresh(); window.scrollTo(0, 0); }));
   el.querySelector('#cancel')?.addEventListener('click', () => { editingId = null; ctx.refresh(); });
 
-  el.querySelector('#delete')?.addEventListener('click', async () => {
-    if (!confirm(`${editing.name} 원아를 삭제할까요?`)) return;
-    await db.del('children', editing.id);
-    for (const r of runs) {
-      if ((r.childIds || []).includes(editing.id)) await db.put('runs', { ...r, childIds: r.childIds.filter((x) => x !== editing.id), updatedAt: Date.now() });
+  el.querySelector('#check-addr')?.addEventListener('click', async () => {
+    const form = el.querySelector('#kid-form');
+    const out = el.querySelector('#addr-result');
+    const addrs = [form.address.value, form.pickup.value].map((s) => s.trim()).filter(Boolean);
+    out.textContent = '확인 중…';
+    const msgs = [];
+    for (const a of addrs) {
+      try {
+        const g = await geocode(a, settings.kakaoRestKey);
+        msgs.push(`✓ ${g.roadAddress || a}`);
+      } catch (e) {
+        msgs.push(`✗ ${e.message}`);
+      }
     }
-    await ctx.touch();
+    out.textContent = msgs.join(' / ');
+  });
+
+  el.querySelector('#delete')?.addEventListener('click', async () => {
+    if (!confirm(`${editing.name} 아이를 명단에서 삭제할까요?`)) return;
+    await db.del('children', editing.id);
     editingId = null;
+    ctx.toast('삭제했습니다');
     ctx.refresh();
   });
 
   el.querySelector('#kid-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const btn = e.target.querySelector('[type=submit]');
-    btn.disabled = true;
-    try {
-      const f = new FormData(e.target);
-      const address = normalizeAddress(f.get('address'));
-      const c = {
-        ...editing,
-        id: editing.id || newId('c'),
-        name: String(f.get('name')).trim(),
-        address,
-        detail: String(f.get('detail') || '').trim(),
-        updatedAt: Date.now(),
-      };
-      const manual = parseLatLng(f.get('coords'));
-      const prevCoords = Number.isFinite(editing.lat) ? `${editing.lat}, ${editing.lng}` : '';
-      const manualChanged = String(f.get('coords') || '').trim() !== prevCoords;
-      if (manual && manualChanged) {
-        Object.assign(c, { lat: manual.lat, lng: manual.lng, roadAddress: '', geoStatus: 'manual' });
-      } else if (address !== editing.address || !Number.isFinite(editing.lat)) {
-        try {
-          const g = await geocode(address, settings.kakaoRestKey);
-          Object.assign(c, { lat: g.lat, lng: g.lng, roadAddress: g.roadAddress || g.addressName, geoStatus: 'ok' });
-        } catch (err) {
-          Object.assign(c, { lat: null, lng: null, roadAddress: '', geoStatus: 'fail' });
-          ctx.toast(`저장했지만 좌표를 찾지 못했습니다: ${err.message}`, 'error');
-        }
-      }
-      await db.put('children', c);
-      const picked = new Set(f.getAll('runs').map(String));
-      for (const r of runs) {
-        const has = (r.childIds || []).includes(c.id);
-        if (picked.has(r.id) && !has) await db.put('runs', { ...r, childIds: [...(r.childIds || []), c.id], updatedAt: Date.now() });
-        if (!picked.has(r.id) && has) await db.put('runs', { ...r, childIds: r.childIds.filter((x) => x !== c.id), updatedAt: Date.now() });
-      }
-      await ctx.touch();
-      editingId = null;
-      if (c.geoStatus !== 'fail') ctx.toast('저장했습니다');
-      ctx.refresh();
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  const regeo = async (list, btn) => {
-    if (!settings.kakaoRestKey) { ctx.toast('설정에서 카카오 REST 키를 먼저 입력하세요', 'error'); return; }
-    btn.disabled = true;
-    let ok = 0; let fail = 0; let lastErr = '';
-    for (const c of list) {
-      btn.textContent = `검색 중… ${ok + fail + 1}/${list.length}`;
-      try {
-        const g = await geocode(c.address, settings.kakaoRestKey);
-        await db.put('children', { ...c, lat: g.lat, lng: g.lng, roadAddress: g.roadAddress || g.addressName, geoStatus: 'ok', updatedAt: Date.now() });
-        ok++;
-      } catch (err) {
-        fail++; lastErr = err.message;
-        if (['NO_KEY', 'KEY', 'QUOTA', 'OFFLINE', 'DISABLED'].includes(err.code)) break; // 더 시도해도 실패할 오류
-      }
-    }
-    await ctx.touch();
-    ctx.toast(`성공 ${ok}명${fail ? `, 실패 ${fail}명 (${lastErr})` : ''}`, fail ? 'error' : 'info');
+    const c = readForm(e.target, editing);
+    if (!c.name || !c.address) { ctx.toast('이름과 주소를 입력하세요', 'error'); return; }
+    await db.put('children', c);
+    editingId = null;
     ctx.refresh();
-  };
-  el.querySelector('#geo-missing')?.addEventListener('click', (e) => regeo(missing, e.currentTarget));
-  el.querySelector('#geo-all')?.addEventListener('click', (e) => {
-    const list = children.filter((c) => c.geoStatus !== 'manual' && c.geoStatus !== 'sample');
-    if (!list.length) { ctx.toast('다시 받을 원아가 없습니다(직접 입력·샘플 좌표 제외)'); return; }
-    if (confirm(`${list.length}명의 좌표를 카카오에서 다시 받을까요?`)) regeo(list, e.currentTarget);
+    // 저장 후 위치 확인(결과는 저장하지 않음). 실패해도 저장은 유지.
+    try {
+      await geocode(stopAddressOf(c), settings.kakaoRestKey);
+      ctx.toast('저장했습니다');
+    } catch (err) {
+      ctx.toast(`저장했지만 위치를 확인하지 못했습니다: ${err.message}`, 'error');
+    }
   });
 }

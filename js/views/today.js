@@ -1,171 +1,211 @@
-// 오늘 운행: 결석 체크 → 순서 재계산, 다음 정류장 길안내, 도착 완료 체크.
-// 계산 결과(snapshot)를 IndexedDB에 저장 → 오프라인/앱 재시작에도 마지막 코스를 그대로 보여 준다.
+// 오늘 운행: 호차·등하원 선택 → 타는 아이 체크(기본 전부) → 자동 경로 → 한 곳씩 길안내 → 완료 체크
+// 체크 해제·오늘만 바꾼 순서·완료는 오늘 날짜에만 적용(다음 날 자동 복귀).
+// 계산 결과는 좌표 없이 스냅샷으로 저장 → 오프라인이면 마지막 순서와 주소 글자만 보여 준다.
 import { esc, localDate } from '../util.js';
-import { buildPlan } from '../plan.js';
-import { stopTitle } from '../stops.js';
-import { fmtHHMM, fmtKm, parseHHMM } from '../route/optimize.js';
-import { launchNavi, NAVI_APPS } from '../navi.js';
+import { courseId, ridersFor, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL } from '../model.js';
+import { NAV_APPS } from '../navlink.js';
+import { pickSel, selectorHtml, bindSelector, minLabel, riderNames } from './common.js';
+import { copyToClipboard } from '../util.js';
 
-let pickedRunId = null;
-
-function autoPick(runs) {
-  const now = new Date();
-  const dow = now.getDay();
-  const mins = now.getHours() * 60 + now.getMinutes();
-  const todays = runs.filter((r) => (r.days || []).includes(dow));
-  const list = (todays.length ? todays : runs).slice().sort((a, b) => parseHHMM(a.departTime) - parseHHMM(b.departTime));
-  return list.find((r) => parseHHMM(r.departTime) >= mins - 60) || list[list.length - 1];
-}
-
-async function rebuild(state, run, children, settings) {
-  const plan = await buildPlan(run, children, settings, { absent: state.absent });
-  const rosterIds = new Set(run.childIds || []);
-  const snap = {
-    builtAt: Date.now(),
-    runName: run.name,
-    departTime: run.departTime,
-    roster: children.filter((c) => rosterIds.has(c.id)).map((c) => ({ id: c.id, name: c.name })),
-    ok: plan.ok,
-    reason: plan.reason || null,
-    missing: (plan.missing || []).map((c) => c.name),
-    usesMyOrder: !!plan.hasSaved,
-  };
-  if (plan.ok) {
-    const m = plan.mine;
-    snap.start = plan.start;
-    snap.stops = m.ordered.map((s, i) => ({ ...s, eta: m.times[i + 1], leg: m.legs[i] }));
-    snap.endEta = m.times[m.times.length - 1];
-    snap.totalM = m.totalM;
-  }
-  state.snapshot = snap;
-}
+let previewDow = 1; // 주말에 미리 볼 요일
 
 export async function render(el, ctx) {
   const { db } = ctx;
-  const [settings, children, runs, rev] = await Promise.all([
-    db.getSettings(), db.getAll('children'), db.getAll('runs'), db.get('kv', 'rev'),
+  const [settings, children, courses, saved] = await Promise.all([
+    ctx.settings(), db.getAll('children'), db.getAll('courses'), db.get('kv', 'today'),
   ]);
-  let state = await db.get('kv', 'today');
   const date = localDate();
+  const state = saved && saved.date === date
+    ? saved
+    : { id: 'today', date, courses: {}, snaps: saved?.snaps || {} };
+  const realDow = new Date().getDay();
+  const weekend = realDow === 0 || realDow === 6;
+  const dow = weekend ? previewDow : realDow;
+  const sel = pickSel(settings, ctx.shared);
+  const cid = courseId(sel.vehicle, sel.shift);
+  const cs = state.courses[cid] || (state.courses[cid] = { unchecked: [], manual: null, done: [] });
+  const riders = ridersFor(children, sel.vehicle, sel.shift, dow);
+  const save = () => db.put('kv', state).catch((e) => { console.error(e); ctx.toast('저장하지 못했습니다', 'error'); });
 
-  if (!runs.length) {
-    el.innerHTML = `<div class="card empty">
-      <h2>운행 회차가 없습니다</h2>
-      <p>명단에서 원아를 등록하고, 시간표에서 등원·하원 회차를 만들어 주세요.</p>
-      <button class="btn primary" data-go="roster">명단으로</button>
-      <button class="btn" data-go="settings">설정 (샘플 데이터)</button></div>`;
+  if (!children.length) {
+    el.innerHTML = `<div class="card empty"><h2>등록된 아이가 없습니다</h2>
+      <p>설정에서 어린이집 주소를 넣고, 명단에서 아이를 등록하세요.</p>
+      <button class="btn primary big" data-go="roster">명단으로</button>
+      <button class="btn" data-go="settings">설정 (샘플 데이터로 시험)</button></div>`;
     el.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => ctx.go(b.dataset.go)));
     return;
   }
 
-  let run = runs.find((r) => r.id === pickedRunId)
-    || (state && state.date === date && runs.find((r) => r.id === state.runId))
-    || autoPick(runs);
-  pickedRunId = run.id;
+  const checklist = riders.map((r) => {
+    const on = !cs.unchecked.includes(r.id);
+    return `<label class="ride ${on ? 'on' : 'off'}"><input type="checkbox" data-ride="${esc(r.id)}" ${on ? 'checked' : ''}>
+      <span class="box" aria-hidden="true">${on ? '☑' : '☐'}</span>
+      <span class="who"><b>${esc(r.name)}</b><small>${on ? '' : '오늘 안 탐 · '}${r.moved ? `<span class="red">오늘만 ${sel.vehicle}호차</span> · ` : ''}${r.desired ? `희망 ${esc(r.desired)} · ` : ''}${esc(r.address)}</small></span></label>`;
+  }).join('');
 
-  let dirty = false;
-  if (!state || state.date !== date || state.runId !== run.id) {
-    state = { id: 'today', date, runId: run.id, absent: [], done: [], snapshot: null };
-    dirty = true;
-  }
-  if (!state.snapshot || (rev?.t || 0) > state.snapshot.builtAt) {
-    try { await rebuild(state, run, children, settings); dirty = true; } catch (e) {
-      console.error(e);
-      ctx.toast('코스를 다시 계산하지 못해 마지막 코스를 표시합니다', 'error');
+  el.innerHTML = `
+    ${weekend ? `<div class="card warn">오늘(${DAY_NAMES[realDow]})은 운행하지 않습니다. 미리 보기 요일:
+      <div class="chips">${[1, 2, 3, 4, 5].map((d) => `<button class="chip ${d === dow ? 'on' : ''}" data-dow="${d}">${DAY_NAMES[d]}</button>`).join('')}</div></div>` : ''}
+    ${selectorHtml(sel)}
+    <div id="route"><div class="card loading">경로 계산 중… (주소 위치 찾는 중)</div></div>
+    <section class="card">
+      <h3>${SHIFT_LABEL[sel.shift]} 타는 아이 <small>체크를 풀면 오늘만 경로에서 빠집니다</small></h3>
+      ${riders.length ? `<div class="rides">${checklist}</div>` : `<p class="muted">${DAY_NAMES[dow]}요일 ${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}에 타는 아이가 없습니다.</p>`}
+    </section>`;
+
+  el.querySelectorAll('[data-dow]').forEach((b) => b.addEventListener('click', () => { previewDow = +b.dataset.dow; ctx.refresh(); }));
+  bindSelector(el, ctx.shared, (apply) => { apply(); ctx.refresh(); });
+  el.querySelectorAll('[data-ride]').forEach((b) => b.addEventListener('change', async () => {
+    const id = b.dataset.ride;
+    cs.unchecked = b.checked ? cs.unchecked.filter((x) => x !== id) : [...cs.unchecked, id];
+    await save();
+    ctx.refresh();
+  }));
+
+  if (!riders.length) { el.querySelector('#route').innerHTML = ''; await save(); return; }
+
+  // ---- 경로 계산 ----
+  const savedOrder = courses.find((c) => c.id === cid)?.order || null;
+  const course = await ctx.compute({ settings, children, vehicle: sel.vehicle, shift: sel.shift, dow, unchecked: cs.unchecked, savedOrder, manualOrder: cs.manual });
+  let view;
+  if (course.ok) {
+    state.snaps[cid] = snapshotOf(course, { date, dow });
+    view = {
+      live: true,
+      label: course.label,
+      depart: course.depart,
+      end: course.mine.end,
+      maxLate: course.mine.maxLate,
+      start: course.start,
+      stops: course.mine.stops.map((s, i) => ({ ...s, ...course.mine.rows[i], legMin: course.mine.rows[i].travel })),
+      failed: course.failed,
+      geoError: course.geoError,
+      providerError: course.providerError,
+      hasManual: course.hasManual,
+      hasSaved: course.hasSaved,
+    };
+  } else {
+    const snap = state.snaps[cid];
+    if (snap) {
+      const unchecked = new Set(cs.unchecked);
+      view = {
+        live: false,
+        reason: course.message,
+        snapDate: snap.date,
+        label: snap.label,
+        depart: snap.depart,
+        end: snap.end,
+        stops: snap.stops
+          .map((s) => ({ ...s, riders: s.riders.filter((r) => !unchecked.has(r.id)) }))
+          .filter((s) => s.riders.length),
+      };
+      if (cs.manual) {
+        const pos = (s) => { const i = s.keys.findIndex((k) => cs.manual.includes(k)); return i < 0 ? 1e9 : cs.manual.indexOf(s.keys[i]); };
+        view.stops.sort((a, b) => pos(a) - pos(b));
+      }
     }
   }
-  if (dirty) await db.put('kv', state);
+  await save();
 
-  const snap = state.snapshot || { ok: false, reason: 'NONE', roster: [], missing: [] };
-  const done = new Set(state.done);
-  const absent = new Set(state.absent);
-  const stops = snap.stops || [];
-  const next = stops.find((s) => !done.has(s.key));
-  const doneCount = stops.filter((s) => done.has(s.key)).length;
-  const naviLabel = NAVI_APPS[settings.naviApp]?.label || '카카오맵';
-
-  const runChips = runs.slice().sort((a, b) => parseHHMM(a.departTime) - parseHHMM(b.departTime)).map((r) => `
-    <button class="chip ${r.id === run.id ? 'on' : ''}" data-run="${esc(r.id)}">${esc(r.name)} <small>${esc(r.departTime || '')}</small></button>`).join('');
-
-  let body = '';
-  if (!snap.ok) {
-    body = snap.reason === 'NO_DAYCARE'
-      ? `<div class="card warn"><h2>어린이집 위치가 없습니다</h2><p>설정에서 어린이집 주소의 좌표를 먼저 찾아 주세요.</p><button class="btn primary" data-go="settings">설정으로</button></div>`
-      : `<div class="card warn"><p>코스를 만들 수 없습니다.</p></div>`;
-  } else if (next) {
-    body = `
-      <section class="next card">
-        <div class="next-label">다음 정류장 · ${doneCount + 1}/${stops.length}</div>
-        <div class="next-name">${esc(stopTitle(next))}</div>
-        <div class="next-addr">${esc(next.address)}</div>
-        <div class="next-eta">예상 ${fmtHHMM(next.eta)}</div>
-        <button class="btn huge go" data-navi="${esc(next.key)}">▶ 다음 정류장 길안내<small>${esc(naviLabel)}</small></button>
-        <button class="btn big ok" data-done="${esc(next.key)}">✓ 도착 완료</button>
-      </section>`;
-  } else {
-    body = `
-      <section class="next card">
-        <div class="next-label">모든 정류장 완료 (${stops.length}곳)</div>
-        <div class="next-name">어린이집으로 복귀</div>
-        <div class="next-eta">예상 ${fmtHHMM(snap.endEta)}</div>
-        <button class="btn huge go" data-navi="__end">▶ 어린이집 길안내<small>${esc(naviLabel)}</small></button>
-      </section>`;
+  const route = el.querySelector('#route');
+  if (!view) {
+    route.innerHTML = `<div class="card warn"><h3>경로를 계산하지 못했습니다</h3><p>${esc(course.message || '')}</p>
+      ${course.reason === 'NO_DAYCARE' || course.reason === 'GEO' ? '<button class="btn primary" data-go="settings">설정 확인</button>' : ''}</div>`;
+    route.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => ctx.go(b.dataset.go)));
+    return;
   }
 
-  const list = stops.map((s, i) => `
+  const done = new Set(cs.done);
+  const stops = view.stops;
+  const next = stops.find((s) => !done.has(s.key));
+  const primary = settings.naviApp === 'tmap' && !settings.showTmap ? 'naver' : settings.naviApp;
+  const secondary = primary === 'naver' ? 'kakaomap' : 'naver';
+  const doneCount = stops.filter((s) => done.has(s.key)).length;
+
+  const nextCard = next ? `
+    <section class="next card">
+      <div class="next-label">다음 정류장 · ${doneCount + 1}/${stops.length}</div>
+      <div class="next-name">${riderNames(next)}</div>
+      <div class="next-addr">${esc(next.address)}</div>
+      <div class="next-eta">예상 ${fmtHHMM(next.time)}${next.wait >= 1 ? ` <span class="badge">${minLabel(next.wait)} 대기</span>` : ''}${next.late ? ` <span class="badge red-bg">${minLabel(next.late)} 늦음</span>` : ''}</div>
+      ${view.live ? `
+        <button class="btn huge go" data-nav="${esc(next.key)}" data-app="${primary}">▶ 다음 정류장 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>
+        <button class="btn" data-nav="${esc(next.key)}" data-app="${secondary}">${esc(NAV_APPS[secondary].label)} 열기</button>`
+      : `<p class="warn-text">위치 정보가 없어 길안내를 열 수 없습니다. 인터넷 연결과 설정을 확인하거나 주소를 복사해 쓰세요.</p>
+        <button class="btn" data-copy="${esc(next.address)}">주소 복사</button>`}
+      <button class="btn big ok" data-done="${esc(next.key)}">✓ 도착 완료</button>
+    </section>` : `
+    <section class="next card">
+      <div class="next-label">모든 정류장 완료 (${stops.length}곳)</div>
+      <div class="next-name">어린이집으로 복귀</div>
+      <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}</div>
+      ${view.live ? `<button class="btn huge go" data-nav="__end" data-app="${primary}">▶ 어린이집 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>` : ''}
+    </section>`;
+
+  const rows = stops.map((s, i) => `
     <li class="stop ${done.has(s.key) ? 'done' : ''} ${next && s.key === next.key ? 'current' : ''}">
-      <span class="time">${fmtHHMM(s.eta)}</span>
-      <span class="who"><b>${i + 1}. ${esc(stopTitle(s))}</b><small>${esc(s.address)}</small></span>
+      <span class="time">${fmtHHMM(s.time)}</span>
+      <span class="who"><b>${i + 1}. ${riderNames(s)}</b><small>${esc(s.address)}</small>
+        ${s.wait >= 1 ? `<em>${minLabel(s.wait)} 대기 (희망 시각 맞춤)</em>` : ''}${s.late ? `<em class="red">희망 시각보다 ${minLabel(s.late)} 늦음</em>` : ''}</span>
+      <span class="updown">
+        <button class="btn sq" data-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="위로">▲</button>
+        <button class="btn sq" data-down="${i}" ${i === stops.length - 1 ? 'disabled' : ''} aria-label="아래로">▼</button>
+      </span>
       <button class="btn check" data-toggle="${esc(s.key)}" aria-label="${done.has(s.key) ? '완료 취소' : '완료'}">${done.has(s.key) ? '✓' : '○'}</button>
     </li>`).join('');
 
-  const rosterHtml = (snap.roster || []).map((c) => `
-    <button class="chip absent-chip ${absent.has(c.id) ? 'on' : ''}" data-absent="${esc(c.id)}" aria-pressed="${absent.has(c.id)}">
-      ${absent.has(c.id) ? '결석 ' : ''}${esc(c.name)}</button>`).join('');
-
-  el.innerHTML = `
-    <div class="chips">${runChips}</div>
-    ${body}
-    ${snap.missing?.length ? `<div class="card warn">좌표가 없어 코스에서 빠진 원아: <b>${esc(snap.missing.join(', '))}</b> (명단에서 주소 확인)</div>` : ''}
+  route.innerHTML = `
+    ${!view.live ? `<div class="card warn"><b>${esc(view.snapDate || '')} 마지막으로 계산한 경로를 보여 줍니다.</b><br>${esc(view.reason || '')}<br><small>체크를 바꾸면 해당 정류장만 빠지고, 시각은 다시 계산되지 않습니다.</small></div>` : ''}
+    ${view.maxLate ? `<div class="card danger-card">⚠ 희망 시각보다 최대 ${minLabel(view.maxLate)} 늦습니다. <b>출발을 ${Math.ceil(view.maxLate)}분 앞당기세요.</b></div>` : ''}
+    ${view.failed?.length ? `<div class="card warn">위치를 찾지 못해 빠진 정류장: <b>${esc(view.failed.map((s) => s.riders.map((r) => r.name).join(', ')).join(' / '))}</b><br><small>${esc(view.geoError?.message || '명단에서 주소를 확인하세요')}</small></div>` : ''}
+    ${nextCard}
     <section class="card">
-      <h3>결석 체크 <small>누르면 결석 / 다시 누르면 취소. 정류장에서 빠지고 순서를 다시 계산합니다</small></h3>
-      <div class="chips wrap">${rosterHtml || '<span class="muted">이 회차에 배정된 원아가 없습니다</span>'}</div>
-    </section>
-    ${stops.length ? `<section class="card">
-      <h3>오늘 코스 <small>${snap.usesMyOrder ? '내 코스 순서' : '추천 순서'} · 출발 ${esc(snap.departTime || '')} · 약 ${fmtKm(snap.totalM || 0)}(직선)</small></h3>
-      <ol class="stops">${list}</ol>
-      <button class="btn" id="reset-done">완료 체크 모두 지우기</button>
-    </section>` : ''}
-  `;
+      <h3>경로 <small>어린이집 ${fmtHHMM(view.depart)} 출발 → ${fmtHHMM(view.end)} 도착 · ${esc(view.label || '')}${view.live ? (view.hasManual ? ' · 오늘만 바꾼 순서' : view.hasSaved ? ' · 내 코스' : ' · 추천 순서') : ''}</small></h3>
+      ${view.providerError ? `<p class="small warn-text">도로 시간을 받지 못해 직선거리로 계산했습니다 (${esc(view.providerError.message)})</p>` : ''}
+      <ol class="stops">${rows}</ol>
+      <div class="actions">
+        ${cs.manual ? '<button class="btn" id="reset-order">오늘 순서 원래대로</button>' : ''}
+        ${cs.done.length ? '<button class="btn" id="reset-done">완료 체크 지우기</button>' : ''}
+      </div>
+    </section>`;
 
-  const save = async () => { await db.put('kv', state); await ctx.refresh(); };
-
-  el.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => ctx.go(b.dataset.go)));
-  el.querySelectorAll('[data-run]').forEach((b) => b.addEventListener('click', () => { pickedRunId = b.dataset.run; ctx.refresh(); }));
-  el.querySelectorAll('[data-navi]').forEach((b) => b.addEventListener('click', async () => {
-    const key = b.dataset.navi;
+  const keys = stops.map((s) => s.key);
+  const move = async (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= keys.length) return;
+    [keys[i], keys[j]] = [keys[j], keys[i]];
+    // 오프라인 스냅샷에서 바꾼 순서도 기억(키 기준)
+    cs.manual = keys.slice();
+    await save();
+    ctx.refresh();
+  };
+  route.querySelectorAll('[data-up]').forEach((b) => b.addEventListener('click', () => move(+b.dataset.up, -1)));
+  route.querySelectorAll('[data-down]').forEach((b) => b.addEventListener('click', () => move(+b.dataset.down, 1)));
+  route.querySelectorAll('[data-nav]').forEach((b) => b.addEventListener('click', () => {
+    const key = b.dataset.nav;
     const dest = key === '__end'
-      ? { name: snap.start?.name || '어린이집', lat: snap.start?.lat, lng: snap.start?.lng }
-      : (() => { const s = stops.find((x) => x.key === key); return { name: stopTitle(s), lat: s.lat, lng: s.lng }; })();
-    const r = await launchNavi(settings.naviApp, dest, settings);
-    ctx.toast(r.message, r.ok ? 'info' : 'error');
+      ? { name: view.start?.name, lat: view.start?.lat, lng: view.start?.lng }
+      : (() => { const s = stops.find((x) => x.key === key); return { name: s.riders.map((r) => r.name).join(', '), lat: s.lat, lng: s.lng }; })();
+    ctx.navigate(b.dataset.app, dest, settings);
   }));
-  el.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', () => {
-    if (!state.done.includes(b.dataset.done)) state.done.push(b.dataset.done);
-    save();
+  route.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
+    ctx.toast((await copyToClipboard(b.dataset.copy)) ? '주소를 복사했습니다' : '복사하지 못했습니다', 'info');
   }));
-  el.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
+  route.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', async () => {
+    if (!cs.done.includes(b.dataset.done)) cs.done.push(b.dataset.done);
+    await save();
+    ctx.refresh();
+    window.scrollTo(0, 0);
+  }));
+  route.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
     const k = b.dataset.toggle;
-    state.done = state.done.includes(k) ? state.done.filter((x) => x !== k) : [...state.done, k];
-    save();
+    cs.done = cs.done.includes(k) ? cs.done.filter((x) => x !== k) : [...cs.done, k];
+    await save();
+    ctx.refresh();
   }));
-  el.querySelectorAll('[data-absent]').forEach((b) => b.addEventListener('click', async () => {
-    const id = b.dataset.absent;
-    state.absent = state.absent.includes(id) ? state.absent.filter((x) => x !== id) : [...state.absent, id];
-    try { await rebuild(state, run, children, settings); } catch (e) { console.error(e); ctx.toast('재계산 실패, 이전 코스 유지', 'error'); }
-    save();
-  }));
-  el.querySelector('#reset-done')?.addEventListener('click', () => {
-    if (confirm('오늘 완료 체크를 모두 지울까요?')) { state.done = []; save(); }
+  route.querySelector('#reset-order')?.addEventListener('click', async () => { cs.manual = null; await save(); ctx.refresh(); });
+  route.querySelector('#reset-done')?.addEventListener('click', async () => {
+    if (!confirm('오늘 완료 체크를 모두 지울까요?')) return;
+    cs.done = []; await save(); ctx.refresh();
   });
 }

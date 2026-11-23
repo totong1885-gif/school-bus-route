@@ -6,8 +6,6 @@ export function localDate(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
-
 let toastTimer = null;
 export function toast(msg, kind = 'info') {
   try {
@@ -20,17 +18,33 @@ export function toast(msg, kind = 'info') {
   } catch { /* 무시 */ }
 }
 
-export function numOrNull(v) {
-  if (v === '' || v === null || v === undefined) return null;
+export function numOr(v, d) {
   const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+  return v === '' || v === null || v === undefined || !Number.isFinite(n) ? d : n;
 }
 
-/** "37.1234, 127.1234" → {lat,lng} | null */
-export function parseLatLng(s) {
-  const m = String(s || '').split(/[,\s]+/).filter(Boolean).map(Number);
-  if (m.length !== 2 || !m.every(Number.isFinite)) return null;
-  const [lat, lng] = m;
-  if (lat < 30 || lat > 45 || lng < 120 || lng > 135) return null; // 한반도 주변 범위만 허용
-  return { lat, lng };
+/** 클립보드 복사: html(엑셀 붙여넣기용)과 text를 함께. 실패하면 예전 방식으로 */
+export async function copyToClipboard(text, html) {
+  try {
+    if (html && navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+        'text/html': new Blob([html], { type: 'text/html' }),
+      })]);
+      return true;
+    }
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch (e) { console.warn('clipboard API 실패', e); }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
 }
