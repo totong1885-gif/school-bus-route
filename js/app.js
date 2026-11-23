@@ -118,6 +118,14 @@ window.addEventListener('offline', updateOnline);
   } catch (e) { console.warn(e); }
   render();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // 새 버전이 설치되어 제어권이 바뀌면 한 번만 새로고침 → 옛 화면이 남지 않게
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
     navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('서비스워커 등록 실패', e));
   }
 })();

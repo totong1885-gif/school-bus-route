@@ -1,6 +1,6 @@
 // 서비스워커: 앱 파일(같은 출처)만 캐시한다. 외부 API(카카오 등)는 가로채지 않는다.
 // 앱 파일을 고치면 VERSION을 올려야 휴대폰에 새 버전이 반영된다.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `busroute-${VERSION}`;
 const ASSETS = [
   './',
@@ -29,7 +29,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' → 브라우저 HTTP 캐시의 옛 파일이 섞이지 않게 항상 서버에서 새로 받는다
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
