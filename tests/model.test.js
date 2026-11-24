@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveRide, ridersFor, buildStops, mergeByGeo, computeTimes, computeCourse, snapshotOf,
-  rideType, exceptionNotes, movedInNotes, parseHHMM, fmtHHMM, departOf, applyTodayExtras,
+  rideType, exceptionNotes, movedInNotes, parseHHMM, fmtHHMM, departOf, applyTodayExtras, compareArrival, elapsedMin, minuteOfDay, durLabel,
 } from '../js/model.js';
 import { sampleData, SAMPLE_PLACES } from '../js/sample.js';
 import { buildNavUrl } from '../js/navlink.js';
@@ -270,4 +270,17 @@ test('오늘만 추가: 명단 아이를 다른 호차로 옮기고, 명단에 �
   const moved = applyTodayExtras(kids, [{ kind: 'roster', childId: 'a', vehicle: 2, shift: 'am' }], 2);
   assert.deepEqual(ridersFor(moved, 1, 'am', 2).map((r) => r.id), []);
   assert.deepEqual(ridersFor(moved, 2, 'am', 2).map((r) => r.id).sort(), ['a', 'b']);
+});
+
+test('도착 기록: 예정 시각과 비교, 출발 후 걸린 시간', () => {
+  const at = (h, m) => new Date(2026, 10, 24, h, m, 30).getTime();
+  assert.equal(minuteOfDay(at(17, 8)), 17 * 60 + 8);
+  assert.deepEqual(compareArrival(at(17, 8), 17 * 60 + 6), { diff: 2, cls: 'late', text: '예정보다 2분 늦음' });
+  assert.deepEqual(compareArrival(at(17, 3), 17 * 60 + 6), { diff: -3, cls: 'early', text: '예정보다 3분 빠름' });
+  assert.equal(compareArrival(at(17, 6), 17 * 60 + 6).text, '예정대로');
+  assert.equal(compareArrival(NaN, 100), null);
+  assert.equal(elapsedMin(at(17, 2), at(17, 21)), 19);
+  assert.equal(elapsedMin(null, at(17, 2)), null);
+  assert.equal(compareArrival(at(20, 28), 17 * 60 + 10).text, '예정보다 3시간 18분 늦음');
+  assert.equal(durLabel(60), '1시간');
 });

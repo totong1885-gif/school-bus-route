@@ -2,7 +2,7 @@
 // 체크 해제·오늘만 바꾼 순서·완료는 오늘 날짜에만 적용(다음 날 자동 복귀).
 // 계산 결과는 좌표 없이 스냅샷으로 저장 → 오프라인이면 마지막 순서와 주소 글자만 보여 준다.
 import { esc, localDate } from '../util.js';
-import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL } from '../model.js';
+import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL, minuteOfDay, compareArrival, elapsedMin, durLabel } from '../model.js';
 import { newId } from '../db.js';
 import { NAV_APPS } from '../navlink.js';
 import { pickSel, selectorHtml, bindSelector, minLabel, riderNames } from './common.js';
@@ -12,6 +12,7 @@ let previewDow = 1; // 주말에 미리 볼 요일
 let ridesOpen = false; // 타는 아이 목록: 평소엔 접어 두고, 연 상태는 앱을 쓰는 동안만 유지
 let addOpen = false; // '오늘만 아이 추가' 칸 열림
 let addMode = 'roster'; // 'roster' 명단에서 고르기 | 'temp' 명단에 없는 아이
+let tick = null; // '지금까지 N분' 1분마다 갱신
 
 export async function render(el, ctx) {
   const { db } = ctx;
@@ -28,6 +29,9 @@ export async function render(el, ctx) {
   const sel = pickSel(settings, ctx.shared);
   const cid = courseId(sel.vehicle, sel.shift);
   const cs = state.courses[cid] || (state.courses[cid] = { unchecked: [], manual: null, done: [] });
+  // 운행 기록(오늘만): 출발 시각, 정류장별 도착 시각, 어린이집 도착 시각 (ms)
+  if (!cs.arrived || typeof cs.arrived !== 'object') cs.arrived = {};
+  if (tick) { clearInterval(tick); tick = null; }
   // 오늘만 추가한 아이(돌발 상황). 날짜가 바뀌면 state가 새로 만들어져 자동으로 사라진다.
   if (!Array.isArray(state.extras)) state.extras = [];
   const todayKids = applyTodayExtras(children, state.extras, dow);
@@ -211,8 +215,26 @@ export async function render(el, ctx) {
   const secondary = primary === 'naver' ? 'kakaomap' : 'naver';
   const doneCount = stops.filter((s) => done.has(s.key)).length;
 
+  // ---- 운행 기록 ----
+  const hhmm = (ms) => fmtHHMM(minuteOfDay(ms));
+  const plannedStartMs = (() => { const d = new Date(); d.setHours(0, Math.round(view.depart), 0, 0); return d.getTime(); })();
+  const baseMs = cs.startedAt || plannedStartMs; // 출발을 기록하지 않았으면 예정 출발 시각 기준
+  const startCmp = cs.startedAt ? compareArrival(cs.startedAt, view.depart) : null;
+  const tripBar = cs.endAt
+    ? `<div class="trip"><span>🏁 <b>운행 끝</b> · ${hhmm(baseMs)} 출발 → ${hhmm(cs.endAt)} 어린이집 도착</span><span>총 <b>${durLabel(elapsedMin(baseMs, cs.endAt))}</b> 걸림 <small>(예정 ${durLabel(view.end - view.depart)})</small></span></div>`
+    : cs.startedAt
+      ? `<div class="trip"><span>🚐 <b>${hhmm(cs.startedAt)} 출발</b>${startCmp && startCmp.diff ? ` <small class="${startCmp.cls}">(${startCmp.text})</small>` : ''}</span><span>출발 후 지금까지 <b id="elapsed">${durLabel(elapsedMin(cs.startedAt, Date.now()))}</b></span></div>`
+      : `<div class="trip">출발 전 · 예정 ${fmtHHMM(view.depart)} 출발 <button class="btn" id="start-now">지금 출발</button></div>`;
+  const recLine = (s) => {
+    const at = cs.arrived[s.key];
+    if (!done.has(s.key) || !at) return '';
+    const c = compareArrival(at, s.time);
+    return `<div class="rec"><span>예정 ${fmtHHMM(s.time)} → <b>도착 ${hhmm(at)}</b></span><span>출발 후 <b>${durLabel(elapsedMin(baseMs, at))}</b></span>${c ? `<span class="${c.cls}">${c.text}</span>` : ''}</div>`;
+  };
+
   const nextCard = next ? `
     <section class="next card">
+      ${tripBar}
       <div class="next-label">다음 정류장 · ${doneCount + 1}/${stops.length}</div>
       <div class="next-name">${riderNames(next)}</div>
       <div class="next-addr">${esc(next.address)}</div>
@@ -225,10 +247,12 @@ export async function render(el, ctx) {
       <button class="btn big ok" data-done="${esc(next.key)}">✓ 도착 완료</button>
     </section>` : `
     <section class="next card">
+      ${tripBar}
       <div class="next-label">모든 정류장 완료 (${stops.length}곳)</div>
-      <div class="next-name">어린이집으로 복귀</div>
-      <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}</div>
-      ${view.live ? `<button class="btn huge go" data-nav="__end" data-app="${primary}">▶ 어린이집 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>` : ''}
+      <div class="next-name">${cs.endAt ? '어린이집 도착 완료' : '어린이집으로 복귀'}</div>
+      <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}${cs.endAt ? ` · 실제 ${hhmm(cs.endAt)} <span class="${compareArrival(cs.endAt, view.end)?.cls}">(${compareArrival(cs.endAt, view.end)?.text})</span>` : ''}</div>
+      ${cs.endAt ? '' : `${view.live ? `<button class="btn huge go" data-nav="__end" data-app="${primary}">▶ 어린이집 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>` : ''}
+      <button class="btn big ok" id="end-now">✓ 어린이집 도착</button>`}
     </section>`;
 
   const rows = stops.map((s, i) => `
@@ -241,6 +265,7 @@ export async function render(el, ctx) {
         <button class="btn sq" data-down="${i}" ${i === stops.length - 1 ? 'disabled' : ''} aria-label="아래로">▼</button>
       </span>
       <button class="btn check" data-toggle="${esc(s.key)}" aria-label="${done.has(s.key) ? '완료 취소' : '완료'}">${done.has(s.key) ? '✓' : '○'}</button>
+      ${recLine(s)}
     </li>`).join('');
 
   route.innerHTML = `
@@ -254,7 +279,7 @@ export async function render(el, ctx) {
       <ol class="stops">${rows}</ol>
       <div class="actions">
         ${cs.manual ? '<button class="btn" id="reset-order">오늘 순서 원래대로</button>' : ''}
-        ${cs.done.length ? '<button class="btn" id="reset-done">완료 체크 지우기</button>' : ''}
+        ${cs.done.length || cs.startedAt || cs.endAt ? '<button class="btn" id="reset-done">완료·시간 기록 지우기</button>' : ''}
       </div>
     </section>`;
 
@@ -275,26 +300,43 @@ export async function render(el, ctx) {
     const dest = key === '__end'
       ? { name: view.start?.name, lat: view.start?.lat, lng: view.start?.lng }
       : (() => { const s = stops.find((x) => x.key === key); return { name: s.riders.map((r) => r.name).join(', '), lat: s.lat, lng: s.lng }; })();
+    // 첫 길안내를 누르면 출발한 것으로 보고 시각을 기록
+    if (!cs.startedAt && !cs.done.length) { cs.startedAt = Date.now(); save(); }
     ctx.navigate(b.dataset.app, dest, settings);
   }));
+  const markArrived = (k) => {
+    if (!cs.done.includes(k)) cs.done.push(k);
+    cs.arrived[k] = Date.now();
+    const s = stops.find((x) => x.key === k);
+    const c = s ? compareArrival(cs.arrived[k], s.time) : null;
+    ctx.toast(`도착 ${hhmm(cs.arrived[k])} · 출발 후 ${durLabel(elapsedMin(baseMs, cs.arrived[k]))}${c ? ` · ${c.text}` : ''}`, 'info');
+  };
+  route.querySelector('#start-now')?.addEventListener('click', async () => { cs.startedAt = Date.now(); await save(); ctx.refresh(); });
+  route.querySelector('#end-now')?.addEventListener('click', async () => { cs.endAt = Date.now(); await save(); ctx.refresh(); window.scrollTo(0, 0); });
+  if (cs.startedAt && !cs.endAt) {
+    tick = setInterval(() => {
+      const e = document.getElementById('elapsed');
+      if (e) e.textContent = durLabel(elapsedMin(cs.startedAt, Date.now())); else { clearInterval(tick); tick = null; }
+    }, 30000);
+  }
   route.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
     ctx.toast((await copyToClipboard(b.dataset.copy)) ? '주소를 복사했습니다' : '복사하지 못했습니다', 'info');
   }));
   route.querySelectorAll('[data-done]').forEach((b) => b.addEventListener('click', async () => {
-    if (!cs.done.includes(b.dataset.done)) cs.done.push(b.dataset.done);
+    markArrived(b.dataset.done);
     await save();
     ctx.refresh();
     window.scrollTo(0, 0);
   }));
   route.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
     const k = b.dataset.toggle;
-    cs.done = cs.done.includes(k) ? cs.done.filter((x) => x !== k) : [...cs.done, k];
+    if (cs.done.includes(k)) { cs.done = cs.done.filter((x) => x !== k); delete cs.arrived[k]; cs.endAt = null; } else markArrived(k);
     await save();
     ctx.refresh();
   }));
   route.querySelector('#reset-order')?.addEventListener('click', async () => { cs.manual = null; await save(); ctx.refresh(); });
   route.querySelector('#reset-done')?.addEventListener('click', async () => {
-    if (!confirm('오늘 완료 체크를 모두 지울까요?')) return;
-    cs.done = []; await save(); ctx.refresh();
+    if (!confirm('오늘 완료 체크와 출발·도착 시간 기록을 모두 지울까요?')) return;
+    cs.done = []; cs.arrived = {}; cs.startedAt = null; cs.endAt = null; await save(); ctx.refresh();
   });
 }

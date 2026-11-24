@@ -1,6 +1,6 @@
 // 서비스워커: 앱 파일(같은 출처)만 캐시한다. 외부 API(카카오 등)는 가로채지 않는다.
 // 앱 파일을 고치면 VERSION을 올려야 휴대폰에 새 버전이 반영된다.
-const VERSION = 'v5';
+const VERSION = 'v6';
 const CACHE = `busroute-${VERSION}`;
 const ASSETS = [
   './',

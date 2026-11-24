@@ -20,6 +20,31 @@ export function parseHHMM(s) {
   return h * 60 + mi;
 }
 
+/** 시각(ms) → 그날 0시부터 몇 분 (분 단위 내림) */
+export function minuteOfDay(ms) {
+  const d = new Date(ms);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/** 실제 도착(ms)과 예정 시각(분)을 비교. diff>0 늦음, <0 빠름, 0 예정대로 */
+export function compareArrival(actualMs, plannedMin) {
+  if (!Number.isFinite(actualMs) || !Number.isFinite(plannedMin)) return null;
+  const diff = minuteOfDay(actualMs) - Math.round(plannedMin);
+  if (diff === 0) return { diff, cls: 'ontime', text: '예정대로' };
+  return diff > 0 ? { diff, cls: 'late', text: `예정보다 ${durLabel(diff)} 늦음` } : { diff, cls: 'early', text: `예정보다 ${durLabel(-diff)} 빠름` };
+}
+
+/** 분 → '45분' / '1시간 5분' */
+export function durLabel(min) {
+  const m = Math.round(Math.abs(min));
+  return m < 60 ? `${m}분` : `${Math.floor(m / 60)}시간${m % 60 ? ` ${m % 60}분` : ''}`;
+}
+
+/** 두 시각(ms) 사이 걸린 분 (반올림) */
+export function elapsedMin(fromMs, toMs) {
+  return Number.isFinite(fromMs) && Number.isFinite(toMs) ? Math.max(0, Math.round((toMs - fromMs) / 60000)) : null;
+}
+
 export function fmtHHMM(min) {
   if (!Number.isFinite(min)) return '--:--';
   const v = ((Math.round(min) % 1440) + 1440) % 1440;
