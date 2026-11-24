@@ -2,12 +2,16 @@
 // 체크 해제·오늘만 바꾼 순서·완료는 오늘 날짜에만 적용(다음 날 자동 복귀).
 // 계산 결과는 좌표 없이 스냅샷으로 저장 → 오프라인이면 마지막 순서와 주소 글자만 보여 준다.
 import { esc, localDate } from '../util.js';
-import { courseId, ridersFor, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL } from '../model.js';
+import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL } from '../model.js';
+import { newId } from '../db.js';
 import { NAV_APPS } from '../navlink.js';
 import { pickSel, selectorHtml, bindSelector, minLabel, riderNames } from './common.js';
 import { copyToClipboard } from '../util.js';
 
 let previewDow = 1; // 주말에 미리 볼 요일
+let ridesOpen = false; // 타는 아이 목록: 평소엔 접어 두고, 연 상태는 앱을 쓰는 동안만 유지
+let addOpen = false; // '오늘만 아이 추가' 칸 열림
+let addMode = 'roster'; // 'roster' 명단에서 고르기 | 'temp' 명단에 없는 아이
 
 export async function render(el, ctx) {
   const { db } = ctx;
@@ -24,7 +28,12 @@ export async function render(el, ctx) {
   const sel = pickSel(settings, ctx.shared);
   const cid = courseId(sel.vehicle, sel.shift);
   const cs = state.courses[cid] || (state.courses[cid] = { unchecked: [], manual: null, done: [] });
-  const riders = ridersFor(children, sel.vehicle, sel.shift, dow);
+  // 오늘만 추가한 아이(돌발 상황). 날짜가 바뀌면 state가 새로 만들어져 자동으로 사라진다.
+  if (!Array.isArray(state.extras)) state.extras = [];
+  const todayKids = applyTodayExtras(children, state.extras, dow);
+  const riders = ridersFor(todayKids, sel.vehicle, sel.shift, dow);
+  const myExtras = state.extras.filter((x) => x.shift === sel.shift && Number(x.vehicle) === sel.vehicle);
+  const extraIdOf = (x) => (x.kind === 'roster' ? x.childId : x.id);
   const save = () => db.put('kv', state).catch((e) => { console.error(e); ctx.toast('저장하지 못했습니다', 'error'); });
 
   if (!children.length) {
@@ -38,23 +47,103 @@ export async function render(el, ctx) {
 
   const checklist = riders.map((r) => {
     const on = !cs.unchecked.includes(r.id);
-    return `<label class="ride ${on ? 'on' : 'off'}"><input type="checkbox" data-ride="${esc(r.id)}" ${on ? 'checked' : ''}>
+    const added = myExtras.some((x) => extraIdOf(x) === r.id);
+    const label = `<label class="ride ${on ? 'on' : 'off'} ${added ? 'added' : ''}"><input type="checkbox" data-ride="${esc(r.id)}" ${on ? 'checked' : ''}>
       <span class="box" aria-hidden="true">${on ? '☑' : '☐'}</span>
-      <span class="who"><b>${esc(r.name)}</b><small>${on ? '' : '오늘 안 탐 · '}${r.moved ? `<span class="red">오늘만 ${sel.vehicle}호차</span> · ` : ''}${r.desired ? `희망 ${esc(r.desired)} · ` : ''}${esc(r.address)}</small></span></label>`;
+      <span class="who"><b>${esc(r.name)}${added ? ' <span class="tag">오늘 추가</span>' : ''}</b><small>${on ? '' : '오늘 안 탐 · '}${r.temp ? '<span class="red">명단에 없는 아이</span> · ' : r.moved && !added ? `<span class="red">오늘만 ${sel.vehicle}호차</span> · ` : ''}${r.desired ? `희망 ${esc(r.desired)} · ` : ''}${esc(r.address)}</small></span></label>`;
+    return added ? `<div class="ride-row">${label}<button class="btn danger" data-unextra="${esc(r.id)}" aria-label="${esc(r.name)} 추가 취소">빼기</button></div>` : label;
   }).join('');
+  // 명단에서 추가할 수 있는 아이: 오늘 이 호차·시간대에 타지 않는 아이
+  const candidates = todayKids.filter((c) => !c._temp && !riders.some((r) => r.id === c.id)).map((c) => {
+    const rr = resolveRide(c, sel.shift, dow);
+    return { c, now: rr.vehicle > 0 ? `오늘 ${rr.vehicle}호차` : `${SHIFT_LABEL[sel.shift]} 안 탐` };
+  });
+  const addPanel = `<div class="add-box">
+    <button class="btn full ${addOpen ? '' : 'primary'}" id="add-toggle" aria-expanded="${addOpen}">${addOpen ? '추가 닫기' : '＋ 오늘만 아이 추가 (돌발 상황)'}</button>
+    ${addOpen ? `<div class="add-panel">
+      <div class="seg">
+        <button class="${addMode === 'roster' ? 'on' : ''}" data-addmode="roster">명단에서 고르기</button>
+        <button class="${addMode === 'temp' ? 'on' : ''}" data-addmode="temp">직접 입력</button>
+      </div>
+      ${addMode === 'roster' ? `
+        <p class="small muted">누르면 오늘만 ${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}에 넣고 순서를 다시 계산합니다. 다른 호차에 타던 아이는 그 호차에서 빠집니다.</p>
+        ${candidates.length ? `<div class="rides">${candidates.map(({ c, now }) => `<button class="ride pick" data-addkid="${esc(c.id)}">
+          <span class="box" aria-hidden="true">＋</span><span class="who"><b>${esc(c.name)}</b><small>${esc(now)} · ${esc(c.pickup || c.address || '')}</small></span></button>`).join('')}</div>`
+          : '<p class="muted">추가할 수 있는 아이가 없습니다. 명단의 아이가 모두 이미 타고 있습니다.</p>'}`
+      : `<form class="form" id="temp-form" autocomplete="off">
+        <label>이름<input name="name" required maxlength="20"></label>
+        <label>${sel.shift === 'am' ? '타는' : '내리는'} 곳 주소 <small>도로명 주소 권장</small><input name="address" required maxlength="100"></label>
+        <label>희망 시각 (선택)<input type="time" name="desired"></label>
+        <button class="btn primary full big" type="submit">오늘만 추가</button>
+        <p class="small muted">오늘 하루만 쓰고 명단에는 저장하지 않습니다. 계속 타면 명단 탭에서 등록하세요.</p>
+      </form>`}
+    </div>` : ''}
+  </div>`;
+  const offRiders = riders.filter((r) => cs.unchecked.includes(r.id));
+  const offCount = offRiders.length;
+  const offNames = offRiders.map((r) => r.name).join(', ');
 
   el.innerHTML = `
     ${weekend ? `<div class="card warn">오늘(${DAY_NAMES[realDow]})은 운행하지 않습니다. 미리 보기 요일:
       <div class="chips">${[1, 2, 3, 4, 5].map((d) => `<button class="chip ${d === dow ? 'on' : ''}" data-dow="${d}">${DAY_NAMES[d]}</button>`).join('')}</div></div>` : ''}
     ${selectorHtml(sel)}
     <div id="route"><div class="card loading">경로 계산 중… (주소 위치 찾는 중)</div></div>
-    <section class="card">
-      <h3>${SHIFT_LABEL[sel.shift]} 타는 아이 <small>체크를 풀면 오늘만 경로에서 빠집니다</small></h3>
-      ${riders.length ? `<div class="rides">${checklist}</div>` : `<p class="muted">${DAY_NAMES[dow]}요일 ${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}에 타는 아이가 없습니다.</p>`}
-    </section>`;
+    <details class="card fold" id="rides-fold" ${ridesOpen || !riders.length ? 'open' : ''}>
+      <summary>
+        <span class="fold-title"><b>${SHIFT_LABEL[sel.shift]} 타는 아이</b>
+          <small>${riders.length - offCount}명 탐${myExtras.length ? ` · <span class="blue">오늘 추가 ${myExtras.length}명</span>` : ''}${offCount ? ` · <span class="red">안 탐 ${offCount}명: ${esc(offNames)}</span>` : ''}</small></span>
+        <span class="fold-btn">${ridesOpen || !riders.length ? '접기 ▲' : '펼치기 ▼'}</span>
+      </summary>
+      ${riders.length ? `<p class="small muted">체크를 풀면 오늘만 경로에서 빠집니다</p>
+      <div class="rides">${checklist}</div>` : `<p class="muted">${DAY_NAMES[dow]}요일 ${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}에 타는 아이가 없습니다.</p>`}
+      ${addPanel}
+    </details>`;
 
   el.querySelectorAll('[data-dow]').forEach((b) => b.addEventListener('click', () => { previewDow = +b.dataset.dow; ctx.refresh(); }));
   bindSelector(el, ctx.shared, (apply) => { apply(); ctx.refresh(); });
+  const fold = el.querySelector('#rides-fold');
+  fold?.addEventListener('toggle', () => {
+    ridesOpen = fold.open;
+    const b = fold.querySelector('.fold-btn');
+    if (b) b.textContent = ridesOpen ? '접기 ▲' : '펼치기 ▼';
+  });
+  // ---- 오늘만 추가 ----
+  const addExtra = async (x, name) => {
+    state.extras = [...state.extras.filter((e) => !(extraIdOf(e) === extraIdOf(x) && e.shift === x.shift)), x];
+    cs.unchecked = cs.unchecked.filter((id) => id !== extraIdOf(x));
+    ridesOpen = true;
+    await save();
+    ctx.toast(`${name}: 오늘만 ${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}에 추가했습니다`, 'info');
+    ctx.refresh();
+  };
+  el.querySelector('#add-toggle')?.addEventListener('click', (e) => { e.preventDefault(); addOpen = !addOpen; ridesOpen = true; ctx.refresh(); });
+  el.querySelectorAll('[data-addmode]').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); addMode = b.dataset.addmode; ctx.refresh(); }));
+  el.querySelectorAll('[data-addkid]').forEach((b) => b.addEventListener('click', (e) => {
+    e.preventDefault();
+    const c = children.find((k) => k.id === b.dataset.addkid);
+    if (!c) return;
+    addOpen = false;
+    addExtra({ kind: 'roster', childId: c.id, vehicle: sel.vehicle, shift: sel.shift }, c.name);
+  }));
+  el.querySelector('#temp-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const name = String(f.get('name') || '').trim();
+    const address = String(f.get('address') || '').trim();
+    if (!name || !address) { ctx.toast('이름과 주소를 넣어 주세요', 'error'); return; }
+    addOpen = false;
+    addExtra({ kind: 'temp', id: newId('tmp'), name, address, desired: String(f.get('desired') || ''), vehicle: sel.vehicle, shift: sel.shift }, name);
+  });
+  el.querySelectorAll('[data-unextra]').forEach((b) => b.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const id = b.dataset.unextra;
+    state.extras = state.extras.filter((x) => !(extraIdOf(x) === id && x.shift === sel.shift));
+    cs.unchecked = cs.unchecked.filter((x) => x !== id);
+    await save();
+    ctx.toast('추가를 취소했습니다', 'info');
+    ctx.refresh();
+  }));
+
   el.querySelectorAll('[data-ride]').forEach((b) => b.addEventListener('change', async () => {
     const id = b.dataset.ride;
     cs.unchecked = b.checked ? cs.unchecked.filter((x) => x !== id) : [...cs.unchecked, id];
@@ -66,7 +155,7 @@ export async function render(el, ctx) {
 
   // ---- 경로 계산 ----
   const savedOrder = courses.find((c) => c.id === cid)?.order || null;
-  const course = await ctx.compute({ settings, children, vehicle: sel.vehicle, shift: sel.shift, dow, unchecked: cs.unchecked, savedOrder, manualOrder: cs.manual });
+  const course = await ctx.compute({ settings, children: todayKids, vehicle: sel.vehicle, shift: sel.shift, dow, unchecked: cs.unchecked, savedOrder, manualOrder: cs.manual });
   let view;
   if (course.ok) {
     state.snaps[cid] = snapshotOf(course, { date, dow });

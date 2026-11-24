@@ -70,7 +70,35 @@ export function ridersFor(children, vehicle, shift, dow) {
   for (const c of children) {
     const r = resolveRide(c, shift, dow);
     if (r.vehicle !== vehicle || vehicle <= 0) continue;
-    out.push({ id: c.id, name: c.name, address: stopAddressOf(c), desired: r.desired, moved: r.changedVehicle, fromVehicle: r.baseVehicle });
+    out.push({ id: c.id, name: c.name, address: stopAddressOf(c), desired: r.desired, moved: r.changedVehicle, fromVehicle: r.baseVehicle, extra: !!c._extra, temp: !!c._temp });
+  }
+  return out;
+}
+
+/**
+ * 오늘만 추가한 아이(돌발 상황)를 명단에 반영한 새 배열. 원본 명단은 바꾸지 않는다.
+ * extras: [{ kind:'roster', childId, vehicle, shift, desired? } | { kind:'temp', id, name, address, vehicle, shift, desired? }]
+ * - roster: 명단에 있는 아이를 그날만 그 호차·시간대로 옮김(요일 예외와 같은 방식)
+ * - temp: 명단에 없는 아이를 그날만 임시로 추가
+ */
+export function applyTodayExtras(children, extras, dow) {
+  if (!extras?.length) return children;
+  const out = children.map((c) => c);
+  for (const x of extras) {
+    const shift = SHIFTS.includes(x.shift) ? x.shift : null;
+    const vehicle = Number(x.vehicle) || 0;
+    if (!shift || vehicle <= 0) continue;
+    const desired = parseHHMM(x.desired) !== null ? x.desired : '';
+    if (x.kind === 'roster') {
+      const i = out.findIndex((c) => c.id === x.childId);
+      if (i < 0) continue;
+      const c = out[i];
+      const key = `${dow}-${shift}`;
+      const prev = c.exceptions?.[key] || {};
+      out[i] = { ...c, _extra: true, exceptions: { ...(c.exceptions || {}), [key]: { ...prev, vehicle, time: desired || prev.time || '' } } };
+    } else if (x.kind === 'temp' && String(x.address || '').trim()) {
+      out.push({ id: x.id, name: String(x.name || '').trim() || '임시', address: String(x.address).trim(), exceptions: { [`${dow}-${shift}`]: { vehicle, time: desired } }, _extra: true, _temp: true });
+    }
   }
   return out;
 }

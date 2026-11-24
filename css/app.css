@@ -209,6 +209,13 @@ label.check input { width: 24px; height: 24px; }
 .small-seg { margin: 0; flex: none; }
 .small-seg button { min-width: 88px; padding: 0 16px; }
 
+.fold > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; cursor: pointer; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold-title { display: flex; flex-direction: column; gap: 2px; font-size: 18px; }
+.fold-title small { font-size: 14px; color: var(--muted); }
+.fold-btn { flex: none; min-height: 44px; display: flex; align-items: center; padding: 0 14px; border: 2px solid var(--line); border-radius: 12px; font-weight: 700; }
+.fold[open] > summary { margin-bottom: 8px; }
+.fold > summary:focus-visible { outline: 3px solid var(--accent); border-radius: 8px; }
 .rides { display: grid; gap: 8px; }
 .ride { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 12px; border: 2px solid var(--line); border-radius: 12px; cursor: pointer; }
 .ride input { position: absolute; opacity: 0; pointer-events: none; }
@@ -217,6 +224,16 @@ label.check input { width: 24px; height: 24px; }
 .ride.off { opacity: .6; }
 .ride.off b { text-decoration: line-through; }
 .ride:has(input:focus-visible) { outline: 3px solid var(--accent); }
+.ride.added { border-color: var(--accent); }
+.ride.pick { width: 100%; font: inherit; color: var(--text); background: var(--card); text-align: left; border-style: dashed; }
+.ride.pick .box { color: var(--accent); font-weight: 700; }
+.ride-row { display: flex; gap: 6px; align-items: stretch; }
+.ride-row .ride { flex: 1; min-width: 0; }
+.ride-row .btn { margin: 0; flex: none; }
+.tag { display: inline-block; font-size: 12px; font-weight: 700; padding: 1px 6px; border-radius: 6px; background: var(--accent); color: var(--card); vertical-align: 2px; }
+.blue { color: var(--accent); font-weight: 700; }
+.add-box { margin-top: 12px; }
+.add-panel { margin-top: 8px; padding: 10px; border: 2px solid var(--line); border-radius: 12px; }
 .stop .updown .btn.sq { min-width: 44px; min-height: 44px; }
 
 .kid { display: flex; flex-direction: column; align-items: flex-start; width: 100%; min-height: 56px; margin: 6px 0 0; padding: 8px 12px;

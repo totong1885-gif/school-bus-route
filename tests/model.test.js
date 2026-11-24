@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveRide, ridersFor, buildStops, mergeByGeo, computeTimes, computeCourse, snapshotOf,
-  rideType, exceptionNotes, movedInNotes, parseHHMM, fmtHHMM, departOf,
+  rideType, exceptionNotes, movedInNotes, parseHHMM, fmtHHMM, departOf, applyTodayExtras,
 } from '../js/model.js';
 import { sampleData, SAMPLE_PLACES } from '../js/sample.js';
 import { buildNavUrl } from '../js/navlink.js';
@@ -244,4 +244,30 @@ test('시간표 복사: 엑셀(등원·하원 나란히)·카톡 텍스트', () 
   const text = tt.kakaoText(data, 1, '제목');
   assert.match(text, /\[등원\]\n■ 1호차 08:03 출발\n {2}08:06 김하늘/);
   assert.match(text, /\* 수: 정여름 탑승/);
+});
+
+test('오늘만 추가: 명단 아이를 다른 호차로 옮기고, 명단에 없는 아이를 임시로 넣는다 (원본 명단은 그대로)', () => {
+  const kids = [
+    { id: 'a', name: '가', address: '햇살시 가길 1', am: { vehicle: 1 }, pm: { vehicle: 1 } },
+    { id: 'b', name: '나', address: '햇살시 나길 2', am: { vehicle: 2 }, pm: { vehicle: 0 } },
+  ];
+  const extras = [
+    { kind: 'roster', childId: 'b', vehicle: 1, shift: 'pm', desired: '17:30' },
+    { kind: 'temp', id: 'tmp1', name: '임시아이', address: '햇살시 다길 3', vehicle: 1, shift: 'pm' },
+    { kind: 'temp', id: 'tmp2', name: '주소없음', address: ' ', vehicle: 1, shift: 'pm' },
+  ];
+  const today = applyTodayExtras(kids, extras, 2);
+  const pm1 = ridersFor(today, 1, 'pm', 2);
+  assert.deepEqual(pm1.map((r) => r.id), ['a', 'b', 'tmp1']);
+  assert.equal(pm1.find((r) => r.id === 'b').desired, '17:30');
+  assert.equal(pm1.find((r) => r.id === 'tmp1').temp, true);
+  // 다른 요일·등원에는 영향 없음, 원본도 그대로
+  assert.deepEqual(ridersFor(today, 1, 'pm', 3).map((r) => r.id), ['a']);
+  assert.deepEqual(ridersFor(today, 2, 'am', 2).map((r) => r.id), ['b']);
+  assert.equal(kids.length, 2);
+  assert.equal(kids[1].exceptions, undefined);
+  // 다른 호차에 타던 아이를 옮기면 원래 호차에서 빠진다
+  const moved = applyTodayExtras(kids, [{ kind: 'roster', childId: 'a', vehicle: 2, shift: 'am' }], 2);
+  assert.deepEqual(ridersFor(moved, 1, 'am', 2).map((r) => r.id), []);
+  assert.deepEqual(ridersFor(moved, 2, 'am', 2).map((r) => r.id).sort(), ['a', 'b']);
 });
