@@ -1,7 +1,8 @@
 // 내비 앱 연결 (정류장 한 곳씩 넘김)
 // 출처(2026-11-23 확인)
-//  - 네이버지도: https://guide.ncloud-docs.com/docs/maps-url-scheme
+//  - 네이버지도: https://guide.ncloud-docs.com/docs/application-maps-url-scheme-vpc (2026-11-25 주소 변경 확인)
 //      nmap://route/car?dlat=&dlng=&dname=&appname=  (appname 필수, 출발지 생략 시 현재 위치, API 키 불필요)
+//      경유지: v1lat/v1lng/v1name … v5lat/v5lng/v5name (최대 5곳, 경로 탐색 공통 파라미터)
 //      안드로이드 웹: intent://...#Intent;scheme=nmap;...;package=com.nhn.android.nmap;end
 //  - 카카오맵 앱: https://apis.map.kakao.com/android_v2/docs/api-guide/urlscheme/
 //      kakaomap://route?sp=위도,경도&ep=위도,경도&by=car   (sp 생략 가능 여부는 실기기 확인 필요)
@@ -34,7 +35,10 @@ export function platformOf(ua) {
 
 const num = (v) => Number(Number(v).toFixed(7));
 
-/** 순수 함수: 길안내 URL. dest = {name, lat, lng} */
+export const NAVER_MAX_VIA = 5;
+const validPt = (p) => p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng));
+
+/** 순수 함수: 길안내 URL. dest = {name, lat, lng, via?: [{name,lat,lng}]} (via는 네이버지도만, 최대 5곳) */
 export function buildNavUrl(app, dest, { ua = '', pageUrl = '' } = {}) {
   const name = encodeURIComponent(dest.name || '목적지');
   const lat = num(dest.lat);
@@ -42,7 +46,9 @@ export function buildNavUrl(app, dest, { ua = '', pageUrl = '' } = {}) {
   const platform = platformOf(ua);
   switch (app) {
     case 'naver': {
-      const path = `route/car?dlat=${lat}&dlng=${lng}&dname=${name}&appname=${encodeURIComponent(pageUrl || 'https://localhost/')}`;
+      const via = (dest.via || []).filter(validPt).slice(0, NAVER_MAX_VIA)
+        .map((v, i) => `&v${i + 1}lat=${num(v.lat)}&v${i + 1}lng=${num(v.lng)}&v${i + 1}name=${encodeURIComponent(v.name || `경유지 ${i + 1}`)}`).join('');
+      const path = `route/car?dlat=${lat}&dlng=${lng}&dname=${name}${via}&appname=${encodeURIComponent(pageUrl || 'https://localhost/')}`;
       if (platform === 'android') {
         return `intent://${path}#Intent;scheme=nmap;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;package=com.nhn.android.nmap;end`;
       }

@@ -112,6 +112,9 @@ window.addEventListener('offline', updateOnline);
 
 (async function start() {
   updateOnline();
+  // 알림에서 앱을 새로 열 때: ./?go=via#today
+  const go = new URLSearchParams(location.search).get('go');
+  if (go) { ctx.shared.go = go; history.replaceState(null, '', location.pathname + location.hash); }
   try {
     if (await db.isMemoryMode()) document.getElementById('memwarn').hidden = false;
     if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
@@ -127,5 +130,14 @@ window.addEventListener('offline', updateOnline);
       location.reload();
     });
     navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('서비스워커 등록 실패', e));
+    // 운행 알림에서 [도착 완료]·[이어서 길안내]를 눌렀을 때
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const t = e.data?.type;
+      if (t === 'today-changed' && current === 'today') render();
+      if (t === 'go') {
+        if (e.data.go) ctx.shared.go = e.data.go;
+        if (current === 'today') render(); else ctx.go('today');
+      }
+    });
   }
 })();

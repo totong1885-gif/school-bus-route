@@ -308,3 +308,12 @@ test('applyTtEdits / ttEditOf: 직접 고친 시각을 덮어쓰고 계산값은
   assert.equal(ttEditOf(null, '1-am', 'a'), null);
   assert.equal(ttEditOf(tt, '1-pm', 'b'), null);
 });
+
+test('buildNavUrl: 네이버지도 경유지(최대 5곳, 좌표 없는 곳 제외)', () => {
+  const dest = { name: '어린이집', lat: 37.5, lng: 127.5 };
+  const via = [{ name: '가', lat: 37.1, lng: 127.1 }, { name: '나', lat: NaN, lng: 1 }, ...[2, 3, 4, 5, 6].map((i) => ({ name: 'v' + i, lat: 37 + i / 10, lng: 127 }))];
+  const u = buildNavUrl('naver', { ...dest, via }, { ua: 'iPhone', pageUrl: 'https://ex/' });
+  assert.match(u, /^nmap:\/\/route\/car\?dlat=37\.5&dlng=127\.5&dname=.+&v1lat=37\.1&v1lng=127\.1&v1name=%EA%B0%80&v2lat=37\.2&.+&v5lat=37\.5&v5lng=127&v5name=v5&appname=/);
+  assert.doesNotMatch(u, /v6lat|NaN/);
+  assert.equal(buildNavUrl('kakaomap', { ...dest, via }, { ua: 'Android' }), 'kakaomap://route?ep=37.5,127.5&by=car');
+});

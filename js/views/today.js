@@ -4,7 +4,7 @@
 import { esc, localDate } from '../util.js';
 import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL, minuteOfDay, compareArrival, elapsedMin, durLabel, ttEditOf, TT_END } from '../model.js';
 import { newId } from '../db.js';
-import { NAV_APPS } from '../navlink.js';
+import { NAV_APPS, NAVER_MAX_VIA } from '../navlink.js';
 import { pickSel, selectorHtml, bindSelector, minLabel, riderNames } from './common.js';
 import { copyToClipboard } from '../util.js';
 
@@ -19,6 +19,7 @@ export async function render(el, ctx) {
   const [settings, children, courses, saved, tt] = await Promise.all([
     ctx.settings(), db.getAll('children'), db.getAll('courses'), db.get('kv', 'today'), db.get('kv', 'ttTimes').catch(() => null),
   ]);
+  let trip = await db.get('kv', 'trip').catch(() => null);
   const date = localDate();
   const state = saved && saved.date === date
     ? saved
@@ -214,6 +215,12 @@ export async function render(el, ctx) {
   const primary = settings.naviApp === 'tmap' && !settings.showTmap ? 'naver' : settings.naviApp;
   const secondary = primary === 'naver' ? 'kakaomap' : 'naver';
   const doneCount = stops.filter((s) => done.has(s.key)).length;
+  // 네이버지도 경유지 길안내: 남은 정류장 순서대로 + 마지막 어린이집. 한 번에 최대 6곳(경유 5 + 목적지 1)
+  const stopName = (s) => s.riders.map((r) => r.name).join(', ');
+  const viaPts = view.live ? [
+    ...stops.filter((s) => !done.has(s.key)).map((s) => ({ key: s.key, name: stopName(s), short: s.riders[0]?.name || '정류장', lat: s.lat, lng: s.lng })),
+    ...(view.start ? [{ key: '__end', name: view.start.name || '어린이집', short: '어린이집', lat: view.start.lat, lng: view.start.lng }] : []),
+  ].filter((p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))) : [];
 
   // ---- 운행 기록 ----
   const hhmm = (ms) => fmtHHMM(minuteOfDay(ms));
@@ -235,15 +242,37 @@ export async function render(el, ctx) {
     return `<div class="rec"><span>예정 ${fmtHHMM(planOf(s))} → <b>도착 ${hhmm(at)}</b></span><span>출발 후 <b>${durLabel(elapsedMin(baseMs, at))}</b></span>${c ? `<span class="${c.cls}">${c.text}</span>` : ''}</div>`;
   };
 
+  // ---- 운행 알림 (내비를 보는 동안 휴대폰 알림으로 다음 아이·도착 완료) ----
+  const canNotify = 'Notification' in window && 'serviceWorker' in navigator;
+  const notifyOn = canNotify && !!trip?.on && trip.cid === cid && trip.date === date && Notification.permission === 'granted';
+  const tripData = () => ({
+    id: 'trip', on: true, date, cid,
+    title: `${sel.vehicle}호차 ${SHIFT_LABEL[sel.shift]}`,
+    stops: stops.map((s) => ({ key: s.key, names: stopName(s), addr: s.address, plan: planOf(s) })),
+    endPlan: planEnd,
+    viaKeys: trip?.cid === cid && trip?.date === date ? trip.viaKeys || [] : [],
+    lastSig: trip?.cid === cid ? trip.lastSig : null,
+    lastKey: trip?.cid === cid ? trip.lastKey : null,
+  });
+  const syncNotice = async (patch = {}, force = false) => {
+    trip = { ...tripData(), ...patch };
+    await db.put('kv', trip).catch(() => {});
+    const reg = await navigator.serviceWorker.ready.catch(() => null);
+    reg?.active?.postMessage({ type: 'trip-sync', force });
+  };
+  const notifyBtn = canNotify ? `<button class="btn notify ${notifyOn ? 'on' : ''}" id="notify-toggle">${notifyOn ? '🔔 운행 알림 켜짐 (끄기)' : '🔕 운행 알림 켜기'}</button>` : '';
+
   const nextCard = next ? `
     <section class="next card">
       ${tripBar}
+      ${notifyBtn}
       <div class="next-label">다음 정류장 · ${doneCount + 1}/${stops.length}</div>
       <div class="next-name">${riderNames(next)}</div>
       <div class="next-addr">${esc(next.address)}</div>
       <div class="next-eta">예상 ${fmtHHMM(next.time)}${planOf(next) !== next.time ? ` <span class="edited-mark">(시간표 ${fmtHHMM(planOf(next))})</span>` : ''}${next.wait >= 1 ? ` <span class="badge">${minLabel(next.wait)} 대기</span>` : ''}${next.late ? ` <span class="badge red-bg">${minLabel(next.late)} 늦음</span>` : ''}</div>
       ${view.live ? `
         <button class="btn huge go" data-nav="${esc(next.key)}" data-app="${primary}">▶ 다음 정류장 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>
+        ${viaPts.length >= 2 ? `<button class="btn big via" id="nav-via">🗺 ${viaPts.length > NAVER_MAX_VIA + 1 ? `앞 ${NAVER_MAX_VIA + 1}곳` : `남은 ${viaPts.length}곳`} 한 번에 길안내<small>네이버지도 · 경유지로 ${viaPts.slice(0, NAVER_MAX_VIA + 1).map((p) => p.short).join(' → ')}</small></button>` : ''}
         <button class="btn" data-nav="${esc(next.key)}" data-app="${secondary}">${esc(NAV_APPS[secondary].label)} 열기</button>`
       : `<p class="warn-text">위치 정보가 없어 길안내를 열 수 없습니다. 인터넷 연결과 설정을 확인하거나 주소를 복사해 쓰세요.</p>
         <button class="btn" data-copy="${esc(next.address)}">주소 복사</button>`}
@@ -251,6 +280,7 @@ export async function render(el, ctx) {
     </section>` : `
     <section class="next card">
       ${tripBar}
+      ${notifyBtn}
       <div class="next-label">모든 정류장 완료 (${stops.length}곳)</div>
       <div class="next-name">${cs.endAt ? '어린이집 도착 완료' : '어린이집으로 복귀'}</div>
       <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}${planEnd !== view.end ? ` (시간표 ${fmtHHMM(planEnd)})` : ''}${cs.endAt ? ` · 실제 ${hhmm(cs.endAt)} <span class="${compareArrival(cs.endAt, planEnd)?.cls}">(${compareArrival(cs.endAt, planEnd)?.text})</span>` : ''}</div>
@@ -305,8 +335,39 @@ export async function render(el, ctx) {
       : (() => { const s = stops.find((x) => x.key === key); return { name: s.riders.map((r) => r.name).join(', '), lat: s.lat, lng: s.lng }; })();
     // 첫 길안내를 누르면 출발한 것으로 보고 시각을 기록
     if (!cs.startedAt && !cs.done.length) { cs.startedAt = Date.now(); save(); }
+    if (notifyOn) syncNotice({ viaKeys: [key] });
     ctx.navigate(b.dataset.app, dest, settings);
   }));
+  route.querySelector('#nav-via')?.addEventListener('click', () => {
+    const pts = viaPts.slice(0, NAVER_MAX_VIA + 1);
+    const last = pts[pts.length - 1];
+    if (!cs.startedAt && !cs.done.length) { cs.startedAt = Date.now(); save(); }
+    if (notifyOn) syncNotice({ viaKeys: pts.map((p) => p.key) });
+    ctx.navigate('naver', { name: last.name, lat: last.lat, lng: last.lng, via: pts.slice(0, -1) }, settings);
+  });
+  route.querySelector('#notify-toggle')?.addEventListener('click', async () => {
+    if (notifyOn) {
+      trip = { ...trip, on: false };
+      await db.put('kv', trip).catch(() => {});
+      (await navigator.serviceWorker.ready.catch(() => null))?.active?.postMessage({ type: 'trip-sync' });
+      ctx.toast('운행 알림을 껐습니다', 'info');
+      ctx.refresh();
+      return;
+    }
+    let perm = Notification.permission;
+    if (perm === 'default') perm = await Notification.requestPermission().catch(() => 'denied');
+    if (perm !== 'granted') { ctx.toast('알림이 막혀 있습니다. 휴대폰 설정 → 앱/크롬 → 알림에서 허용해 주세요', 'error'); return; }
+    await syncNotice({}, true);
+    ctx.toast('운행 알림을 켰습니다. 내비를 보면서 알림에서 [도착 완료]를 누르세요', 'info');
+    ctx.refresh();
+  });
+  if (notifyOn) syncNotice();
+  // 알림의 [이어서 길안내]로 앱이 열렸을 때
+  if (ctx.shared.go === 'via') {
+    ctx.shared.go = '';
+    const b = route.querySelector('#nav-via') || route.querySelector('[data-nav]');
+    if (b) { b.scrollIntoView({ block: 'center' }); b.classList.add('pulse'); try { b.click(); } catch { /* 막히면 직접 누르게 둔다 */ } }
+  }
   const markArrived = (k) => {
     if (!cs.done.includes(k)) cs.done.push(k);
     cs.arrived[k] = Date.now();

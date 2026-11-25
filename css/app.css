@@ -292,3 +292,9 @@ label.check input { width: 24px; height: 24px; }
   .red { color: #c00 !important; }
 }
 .hint[hidden] { display: none; }
+.btn.via { display: flex; flex-direction: column; align-items: center; width: 100%; border: 2px solid var(--go); color: var(--go); background: var(--card); font-weight: 800; }
+.btn.via small { font-weight: 400; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.btn.notify { width: 100%; margin: 6px 0 10px; border: 2px dashed var(--line); background: var(--card); color: var(--text); font-weight: 700; }
+.btn.notify.on { border: 2px solid var(--go); color: var(--go); background: var(--bg); }
+.btn.pulse { animation: pulse 1s ease-in-out 3; }
+@keyframes pulse { 50% { transform: scale(1.04); box-shadow: 0 0 0 6px var(--brand); } }
