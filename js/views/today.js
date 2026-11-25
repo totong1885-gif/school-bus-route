@@ -2,7 +2,7 @@
 // 체크 해제·오늘만 바꾼 순서·완료는 오늘 날짜에만 적용(다음 날 자동 복귀).
 // 계산 결과는 좌표 없이 스냅샷으로 저장 → 오프라인이면 마지막 순서와 주소 글자만 보여 준다.
 import { esc, localDate } from '../util.js';
-import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL, minuteOfDay, compareArrival, elapsedMin, durLabel } from '../model.js';
+import { courseId, ridersFor, resolveRide, applyTodayExtras, fmtHHMM, snapshotOf, DAY_NAMES, SHIFT_LABEL, minuteOfDay, compareArrival, elapsedMin, durLabel, ttEditOf, TT_END } from '../model.js';
 import { newId } from '../db.js';
 import { NAV_APPS } from '../navlink.js';
 import { pickSel, selectorHtml, bindSelector, minLabel, riderNames } from './common.js';
@@ -16,8 +16,8 @@ let tick = null; // '지금까지 N분' 1분마다 갱신
 
 export async function render(el, ctx) {
   const { db } = ctx;
-  const [settings, children, courses, saved] = await Promise.all([
-    ctx.settings(), db.getAll('children'), db.getAll('courses'), db.get('kv', 'today'),
+  const [settings, children, courses, saved, tt] = await Promise.all([
+    ctx.settings(), db.getAll('children'), db.getAll('courses'), db.get('kv', 'today'), db.get('kv', 'ttTimes').catch(() => null),
   ]);
   const date = localDate();
   const state = saved && saved.date === date
@@ -217,6 +217,9 @@ export async function render(el, ctx) {
 
   // ---- 운행 기록 ----
   const hhmm = (ms) => fmtHHMM(minuteOfDay(ms));
+  // 예정 시각: 시간표에서 직접 고친 시각이 있으면 그것, 없으면 계산 시각
+  const planOf = (s) => ttEditOf(tt, cid, s.keys || s.key) ?? s.time;
+  const planEnd = ttEditOf(tt, cid, TT_END) ?? view.end;
   const plannedStartMs = (() => { const d = new Date(); d.setHours(0, Math.round(view.depart), 0, 0); return d.getTime(); })();
   const baseMs = cs.startedAt || plannedStartMs; // 출발을 기록하지 않았으면 예정 출발 시각 기준
   const startCmp = cs.startedAt ? compareArrival(cs.startedAt, view.depart) : null;
@@ -228,8 +231,8 @@ export async function render(el, ctx) {
   const recLine = (s) => {
     const at = cs.arrived[s.key];
     if (!done.has(s.key) || !at) return '';
-    const c = compareArrival(at, s.time);
-    return `<div class="rec"><span>예정 ${fmtHHMM(s.time)} → <b>도착 ${hhmm(at)}</b></span><span>출발 후 <b>${durLabel(elapsedMin(baseMs, at))}</b></span>${c ? `<span class="${c.cls}">${c.text}</span>` : ''}</div>`;
+    const c = compareArrival(at, planOf(s));
+    return `<div class="rec"><span>예정 ${fmtHHMM(planOf(s))} → <b>도착 ${hhmm(at)}</b></span><span>출발 후 <b>${durLabel(elapsedMin(baseMs, at))}</b></span>${c ? `<span class="${c.cls}">${c.text}</span>` : ''}</div>`;
   };
 
   const nextCard = next ? `
@@ -238,7 +241,7 @@ export async function render(el, ctx) {
       <div class="next-label">다음 정류장 · ${doneCount + 1}/${stops.length}</div>
       <div class="next-name">${riderNames(next)}</div>
       <div class="next-addr">${esc(next.address)}</div>
-      <div class="next-eta">예상 ${fmtHHMM(next.time)}${next.wait >= 1 ? ` <span class="badge">${minLabel(next.wait)} 대기</span>` : ''}${next.late ? ` <span class="badge red-bg">${minLabel(next.late)} 늦음</span>` : ''}</div>
+      <div class="next-eta">예상 ${fmtHHMM(next.time)}${planOf(next) !== next.time ? ` <span class="edited-mark">(시간표 ${fmtHHMM(planOf(next))})</span>` : ''}${next.wait >= 1 ? ` <span class="badge">${minLabel(next.wait)} 대기</span>` : ''}${next.late ? ` <span class="badge red-bg">${minLabel(next.late)} 늦음</span>` : ''}</div>
       ${view.live ? `
         <button class="btn huge go" data-nav="${esc(next.key)}" data-app="${primary}">▶ 다음 정류장 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>
         <button class="btn" data-nav="${esc(next.key)}" data-app="${secondary}">${esc(NAV_APPS[secondary].label)} 열기</button>`
@@ -250,7 +253,7 @@ export async function render(el, ctx) {
       ${tripBar}
       <div class="next-label">모든 정류장 완료 (${stops.length}곳)</div>
       <div class="next-name">${cs.endAt ? '어린이집 도착 완료' : '어린이집으로 복귀'}</div>
-      <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}${cs.endAt ? ` · 실제 ${hhmm(cs.endAt)} <span class="${compareArrival(cs.endAt, view.end)?.cls}">(${compareArrival(cs.endAt, view.end)?.text})</span>` : ''}</div>
+      <div class="next-eta">예상 도착 ${fmtHHMM(view.end)}${planEnd !== view.end ? ` (시간표 ${fmtHHMM(planEnd)})` : ''}${cs.endAt ? ` · 실제 ${hhmm(cs.endAt)} <span class="${compareArrival(cs.endAt, planEnd)?.cls}">(${compareArrival(cs.endAt, planEnd)?.text})</span>` : ''}</div>
       ${cs.endAt ? '' : `${view.live ? `<button class="btn huge go" data-nav="__end" data-app="${primary}">▶ 어린이집 길안내<small>${esc(NAV_APPS[primary].label)}</small></button>` : ''}
       <button class="btn big ok" id="end-now">✓ 어린이집 도착</button>`}
     </section>`;
@@ -308,7 +311,7 @@ export async function render(el, ctx) {
     if (!cs.done.includes(k)) cs.done.push(k);
     cs.arrived[k] = Date.now();
     const s = stops.find((x) => x.key === k);
-    const c = s ? compareArrival(cs.arrived[k], s.time) : null;
+    const c = s ? compareArrival(cs.arrived[k], planOf(s)) : null;
     ctx.toast(`도착 ${hhmm(cs.arrived[k])} · 출발 후 ${durLabel(elapsedMin(baseMs, cs.arrived[k]))}${c ? ` · ${c.text}` : ''}`, 'info');
   };
   route.querySelector('#start-now')?.addEventListener('click', async () => { cs.startedAt = Date.now(); await save(); ctx.refresh(); });

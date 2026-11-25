@@ -1,7 +1,9 @@
 // 시간표: 선생님 공유용 한 페이지. 등원(왼쪽)·하원(오른쪽), 호차별 칸. 월~금 기본 배정 기준.
 // 요일 예외는 빨간 글씨. 복사(엑셀/카톡)·인쇄(A4 가로).
 import { esc, copyToClipboard } from '../util.js';
-import { courseId, fmtHHMM, SHIFTS, SHIFT_LABEL, exceptionNotes, movedInNotes } from '../model.js';
+import { courseId, fmtHHMM, SHIFTS, SHIFT_LABEL, exceptionNotes, movedInNotes, applyTtEdits, TT_END } from '../model.js';
+
+let editing = false; // 시간 직접 수정 모드
 
 async function buildSections(ctx, settings, children, courses) {
   const n = Math.min(3, Math.max(1, Number(settings.vehicleCount) || 1));
@@ -20,6 +22,8 @@ async function buildSections(ctx, settings, children, courses) {
         depart: course.depart,
         end: course.mine.end,
         stops: course.mine.stops.map((s, i) => ({
+          key: s.key,
+          keys: s.keys,
           names: s.riders.map((r) => ({ name: r.name, notes: exceptionNotes(byId.get(r.id), shift) })),
           time: course.mine.rows[i].time,
           late: course.mine.rows[i].late,
@@ -37,6 +41,14 @@ async function buildSections(ctx, settings, children, courses) {
 const nameHtml = (s) => s.names.map((x) => `${esc(x.name)}${x.notes.length ? ` <span class="red">(${esc(x.notes.join(', '))})</span>` : ''}`).join(', ');
 const nameText = (s) => s.names.map((x) => `${x.name}${x.notes.length ? `(${x.notes.join(', ')})` : ''}`).join(', ');
 
+// 시각 칸: 평소엔 글자, 수정 모드에선 입력칸. 직접 고친 시각은 파란 글씨 + 계산 시각을 작게
+function timeCell(cid, key, time, edited, calc, extraCls = '') {
+  if (editing && key) {
+    return `<td class="t edit ${extraCls}"><input type="time" class="tt-in ${edited ? 'edited' : ''}" data-cid="${esc(cid)}" data-key="${esc(key)}" value="${fmtHHMM(time)}" aria-label="시각 고치기">${edited ? `<button class="tt-undo" data-undo="${esc(cid)}|${esc(key)}">계산값 ${fmtHHMM(calc)}로</button>` : ''}</td>`;
+  }
+  return `<td class="t ${extraCls} ${edited ? 'edited' : ''}">${edited ? '✎' : ''}${fmtHHMM(time)}${edited ? `<small class="calc">계산 ${fmtHHMM(calc)}</small>` : ''}</td>`;
+}
+
 function tableHtml(shift, data, n) {
   let rows = '';
   for (let v = 1; v <= n; v++) {
@@ -49,10 +61,10 @@ function tableHtml(shift, data, n) {
     } else {
       sec.stops.forEach((s, i) => {
         rows += `<tr class="${i === 0 ? 'vstart' : ''}">${i === 0 ? `<th rowspan="${span}">${v}호차<br><small>${fmtHHMM(sec.depart)} 출발</small>${sec.mine ? '' : '<br><small>(추천 순서)</small>'}</th>` : ''}
-          <td>${nameHtml(s)}</td><td class="t ${s.late ? 'red' : ''}">${fmtHHMM(s.time)}</td></tr>`;
+          <td>${nameHtml(s)}</td>${timeCell(courseId(v, shift), s.key, s.time, s.edited, s.calc, s.late ? 'red' : '')}</tr>`;
       });
     }
-    rows += `<tr class="arrive"><td>어린이집 도착</td><td class="t">${fmtHHMM(sec.end)}</td></tr>`;
+    rows += `<tr class="arrive"><td>어린이집 도착</td>${timeCell(courseId(v, shift), TT_END, sec.end, sec.endEdited, sec.calcEnd)}</tr>`;
     if (extra.length) rows += `<tr><td colspan="2" class="small">${extra.join('<br>')}</td></tr>`;
   }
   return `<table class="tt"><caption>${SHIFT_LABEL[shift]}</caption>
@@ -112,8 +124,17 @@ export async function render(el, ctx) {
   }
   const n = data.n;
   const title = `${settings.daycare.name || '어린이집'} 등·하원 차량 시간표 (월~금 기본)`;
+  const base = data;
+  let tt = (await db.get('kv', 'ttTimes').catch(() => null)) || { id: 'ttTimes', courses: {} };
+  if (!tt.courses || typeof tt.courses !== 'object') tt.courses = {};
+  const saveTt = () => db.put('kv', tt).catch((e) => { console.error(e); ctx.toast('저장하지 못했습니다', 'error'); });
+  const editCount = () => Object.values(tt.courses).reduce((a, m) => a + Object.keys(m || {}).length, 0);
 
-  el.innerHTML = `
+  // 계산은 한 번만 하고, 수정 모드 전환·시각 수정은 화면만 다시 그린다
+  const paint = () => {
+    data = { ...base, sections: applyTtEdits(base.sections, tt) };
+    const cnt = editCount();
+    el.innerHTML = `
     <div class="no-print actions">
       <button class="btn" id="copy-excel">📋 엑셀용 복사</button>
       <button class="btn" id="copy-kakao">💬 카톡용 복사</button>
@@ -122,31 +143,64 @@ export async function render(el, ctx) {
     ${offline ? `<div class="card warn no-print">지금은 계산할 수 없어 ${new Date(snap.builtAt).toLocaleString('ko-KR')}에 만든 시간표를 보여 줍니다. (${esc(freshFail || '')})</div>` : ''}
     ${!offline && data.failMsg ? `<div class="card warn no-print">${esc(data.failMsg)}</div>` : ''}
     ${allFailed && !snap ? `<div class="card warn">시간표를 계산하지 못했습니다. 인터넷 연결과 설정을 확인하세요.</div>` : `
-    <div class="sheet">
+    <div class="no-print tt-editbar ${editing ? 'on' : ''}">
+      <button class="btn ${editing ? 'ok' : 'primary'} full" id="tt-edit">${editing ? '✓ 시간 수정 끝' : '✏️ 시간 직접 수정'}</button>
+      ${editing ? '<p class="small">시각 칸을 눌러 바꾸면 바로 저장됩니다. 계산값으로 돌리려면 칸 아래 버튼을 누르세요.</p>' : ''}
+      ${cnt ? `<p class="small"><span class="edited-mark">✎ 직접 고친 시간 ${cnt}개</span> ${editing ? '<button class="btn danger" id="tt-reset">모두 계산값으로</button>' : ''}</p>` : ''}
+    </div>
+    <div class="sheet ${editing ? 'editing' : ''}">
       <h2 class="sheet-title">${esc(title)}</h2>
       <div class="tt-wrap">${tableHtml('am', data, n)}${tableHtml('pm', data, n)}</div>
-      <p class="small muted">빨간 글씨 = 요일별 예외 (✗ 그날 안 탐 · N호차 = 그날만 다른 호차 · 시각 = 그날만 희망 시각)</p>
+      <p class="small muted">빨간 글씨 = 요일별 예외 (✗ 그날 안 탐 · N호차 = 그날만 다른 호차 · 시각 = 그날만 희망 시각)${cnt ? ' · <span class="edited-mark">✎ 파란 글씨 = 직접 고친 시간</span> (작은 글씨는 계산한 시간)' : ''}</p>
     </div>
     <div class="no-print actions">
       ${Array.from({ length: n }, (_, i) => i + 1).flatMap((v) => SHIFTS.map((s) => `<button class="btn" data-edit="${v}-${s}">${v}호차 ${SHIFT_LABEL[s]} 순서 수정</button>`)).join('')}
     </div>`}`;
+    bind();
+  };
 
-  el.querySelector('#print').addEventListener('click', () => { try { window.print(); } catch { ctx.toast('인쇄를 열 수 없습니다', 'error'); } });
-  el.querySelector('#copy-excel').addEventListener('click', async () => {
-    const rows = excelRows(data, n);
-    const tsv = rows.map((r) => r.join('\t')).join('\n');
-    const html = `<table>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</table>`;
-    ctx.toast((await copyToClipboard(tsv, html)) ? '복사했습니다. 엑셀에 붙여 넣으세요' : '복사하지 못했습니다', 'info');
-  });
-  el.querySelector('#copy-kakao').addEventListener('click', async () => {
-    ctx.toast((await copyToClipboard(kakaoText(data, n, title))) ? '복사했습니다. 카톡에 붙여 넣으세요' : '복사하지 못했습니다', 'info');
-  });
-  el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
-    const [v, s] = b.dataset.edit.split('-');
-    ctx.shared.vehicle = +v;
-    ctx.shared.shift = s;
-    ctx.go('course');
-  }));
+  const bind = () => {
+    el.querySelector('#print').addEventListener('click', () => { try { window.print(); } catch { ctx.toast('인쇄를 열 수 없습니다', 'error'); } });
+    el.querySelector('#copy-excel').addEventListener('click', async () => {
+      const rows = excelRows(data, n);
+      const tsv = rows.map((r) => r.join('\t')).join('\n');
+      const html = `<table>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</table>`;
+      ctx.toast((await copyToClipboard(tsv, html)) ? '복사했습니다. 엑셀에 붙여 넣으세요' : '복사하지 못했습니다', 'info');
+    });
+    el.querySelector('#copy-kakao').addEventListener('click', async () => {
+      ctx.toast((await copyToClipboard(kakaoText(data, n, title))) ? '복사했습니다. 카톡에 붙여 넣으세요' : '복사하지 못했습니다', 'info');
+    });
+    el.querySelector('#tt-edit')?.addEventListener('click', () => { editing = !editing; paint(); });
+    el.querySelectorAll('.tt-in').forEach((inp) => inp.addEventListener('change', async () => {
+      const { cid, key } = inp.dataset;
+      const m = tt.courses[cid] || (tt.courses[cid] = {});
+      if (inp.value) m[key] = inp.value; else delete m[key];
+      await saveTt();
+      ctx.toast(inp.value ? `${inp.value}(으)로 고쳤습니다` : '계산값으로 돌렸습니다', 'info');
+      paint();
+    }));
+    el.querySelectorAll('[data-undo]').forEach((b) => b.addEventListener('click', async () => {
+      const [cid, key] = b.dataset.undo.split('|');
+      if (tt.courses[cid]) delete tt.courses[cid][key];
+      await saveTt();
+      ctx.toast('계산값으로 돌렸습니다', 'info');
+      paint();
+    }));
+    el.querySelector('#tt-reset')?.addEventListener('click', async () => {
+      if (!confirm('직접 고친 시간을 모두 지우고 계산값으로 돌릴까요?')) return;
+      tt.courses = {};
+      await saveTt();
+      paint();
+    });
+    el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+      const [v, s] = b.dataset.edit.split('-');
+      ctx.shared.vehicle = +v;
+      ctx.shared.shift = s;
+      editing = false;
+      ctx.go('course');
+    }));
+  };
+  paint();
 }
 
 export const _test = { excelRows, kakaoText };

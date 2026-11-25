@@ -269,12 +269,22 @@ label.check input { width: 24px; height: 24px; }
 .tt td.t { width: 64px; font-variant-numeric: tabular-nums; font-weight: 700; }
 .tt tr.vstart td, .tt tr.vstart th { border-top: 3px solid var(--text); }
 .tt tr.arrive td { color: var(--muted); }
+.tt td.t.edited, .edited-mark { color: var(--accent); }
+.tt td.t.edited { white-space: nowrap; }
+.tt td.t .calc { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+.sheet.editing .tt td.t { width: auto; }
+.tt-in { font: inherit; font-weight: 700; width: 100%; min-width: 92px; min-height: 40px; padding: 4px; border: 2px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); }
+.tt-in.edited { border-color: var(--accent); color: var(--accent); }
+.tt-undo { display: block; margin-top: 4px; width: 100%; font-size: 12px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.tt-editbar { margin: 8px 0 12px; }
+.tt-editbar.on { padding: 10px; border: 2px dashed var(--accent); border-radius: 12px; }
 
 @media print {
   @page { size: A4 landscape; margin: 10mm; }
   :root { --bg: #fff; --card: #fff; --text: #000; --line: #888; --warn-bg: #f3f3f3; --danger: #c00; --brand: #ddd; --brand-ink: #000; }
   body { padding: 0; background: #fff; font-size: 12px; }
   .top, .nav, .banner, .toast, .hint, .no-print { display: none !important; }
+  .tt td.t .calc { display: none; }
   main { max-width: none; padding: 0; }
   .tt-wrap { grid-template-columns: 1fr 1fr !important; gap: 8mm; }
   .tt { font-size: 11px; }

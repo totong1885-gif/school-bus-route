@@ -51,6 +51,36 @@ export function fmtHHMM(min) {
   return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
 }
 
+// ---------- 시간표 직접 수정 ----------
+// kv 'ttTimes' = { id:'ttTimes', courses: { '1-am': { <정류장 key>: 'HH:MM', __end: 'HH:MM' } } }
+export const TT_END = '__end';
+
+/** 직접 고친 시각(분). 정류장 key 목록(합쳐진 정류장)이면 그중 하나라도 있으면 사용. 없으면 null */
+export function ttEditOf(tt, cid, keys) {
+  const m = tt?.courses?.[cid];
+  if (!m) return null;
+  for (const k of [].concat(keys || [])) {
+    const t = parseHHMM(m[k]);
+    if (t !== null) return t;
+  }
+  return null;
+}
+
+/** 시간표 구역에 직접 고친 시각을 덮어쓴 복사본. 계산 시각은 calc에 남긴다 */
+export function applyTtEdits(sections, tt) {
+  const out = {};
+  for (const [cid, sec] of Object.entries(sections || {})) {
+    if (!sec) { out[cid] = sec; continue; }
+    const stops = sec.stops.map((s) => {
+      const e = ttEditOf(tt, cid, s.keys || s.key);
+      return e === null ? { ...s } : { ...s, calc: s.time, time: e, edited: true, late: 0 };
+    });
+    const e = ttEditOf(tt, cid, TT_END);
+    out[cid] = { ...sec, stops, ...(e === null ? {} : { calcEnd: sec.end, end: e, endEdited: true }) };
+  }
+  return out;
+}
+
 export function departOf(settings, vehicle, shift) {
   const t = parseHHMM(settings?.departTimes?.[courseId(vehicle, shift)]);
   return t ?? parseHHMM(DEFAULT_DEPART[shift]);

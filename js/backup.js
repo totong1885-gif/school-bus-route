@@ -14,6 +14,7 @@ export async function buildBackup({ includeKeys = false } = {}) {
     settings,
     children: await db.getAll('children'),
     courses: await db.getAll('courses'),
+    ttTimes: (await db.get('kv', 'ttTimes').catch(() => null))?.courses || {},
   };
 }
 
@@ -51,6 +52,8 @@ export async function restoreBackup(obj) {
   await db.del('kv', 'timetable');
   for (const c of obj.children) await db.put('children', stripCoords(c));
   for (const c of obj.courses || []) await db.put('courses', c);
+  await db.del('kv', 'ttTimes');
+  if (obj.ttTimes && typeof obj.ttTimes === 'object') await db.put('kv', { id: 'ttTimes', courses: obj.ttTimes });
   await db.saveSettings(s);
 }
 

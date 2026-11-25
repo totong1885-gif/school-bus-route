@@ -284,3 +284,27 @@ test('도착 기록: 예정 시각과 비교, 출발 후 걸린 시간', () => {
   assert.equal(compareArrival(at(20, 28), 17 * 60 + 10).text, '예정보다 3시간 18분 늦음');
   assert.equal(durLabel(60), '1시간');
 });
+
+test('applyTtEdits / ttEditOf: 직접 고친 시각을 덮어쓰고 계산값은 남긴다', async () => {
+  const { applyTtEdits, ttEditOf, TT_END } = await import('../js/model.js');
+  const sections = {
+    '1-am': { vehicle: 1, shift: 'am', depart: 480, end: 525, stops: [
+      { key: 'a', keys: ['a', 'b'], time: 499, late: 3 },
+      { key: 'c', keys: ['c'], time: 510, late: 0 },
+    ] },
+    '2-am': null,
+  };
+  const tt = { courses: { '1-am': { b: '08:25', [TT_END]: '08:50', c: 'bad' } } };
+  const out = applyTtEdits(sections, tt);
+  assert.equal(out['1-am'].stops[0].time, 505);
+  assert.equal(out['1-am'].stops[0].calc, 499);
+  assert.equal(out['1-am'].stops[0].edited, true);
+  assert.equal(out['1-am'].stops[0].late, 0);
+  assert.equal(out['1-am'].stops[1].edited, undefined);
+  assert.equal(out['1-am'].end, 530);
+  assert.equal(out['1-am'].calcEnd, 525);
+  assert.equal(out['2-am'], null);
+  assert.equal(sections['1-am'].stops[0].time, 499, '원본은 그대로');
+  assert.equal(ttEditOf(null, '1-am', 'a'), null);
+  assert.equal(ttEditOf(tt, '1-pm', 'b'), null);
+});
