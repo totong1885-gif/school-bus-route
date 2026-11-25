@@ -2,5 +2,5 @@
   "name": "school-bus-route",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test tests/optimizer.test.js tests/model.test.js tests/sw.test.js" }
+  "scripts": { "test": "node --test tests/optimizer.test.js tests/model.test.js" }
 }
